@@ -16,8 +16,13 @@ dp = Dispatcher()
 
 CAFES = {"1": "CaVa", "2": "Порт-Брю"}
 MENU = {
-    "1": {"1": "Капучино", "2": "Латте"},
+    "1": {"1": "Бамбл", "2": "Айс-Латте"},
     "2": {"1": "Американо", "2": "Раф"},
+}
+
+prices = {
+    "1": {"1": 285, "2": 160},
+    "2": {"1": 100, "2": 250},
 }
 
 
@@ -49,7 +54,7 @@ async def cafe_callback(callback: CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=drink_name, callback_data=f"drink:{cafe_id}:{drink_id}")]
+            [InlineKeyboardButton(text=f"{drink_name} {prices[cafe_id][drink_id]}р ", callback_data=f"drink:{cafe_id}:{drink_id}")]
             for drink_id, drink_name in MENU[cafe_id].items()
         ]
     )
