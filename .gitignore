@@ -2,9 +2,3 @@
 .venv/
 __pycache__/
 *.pyc
-.idea/
-uv.lock
-node_modules/
-mini_app/dist/
-*.tsbuildinfo
-.tools/

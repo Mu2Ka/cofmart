@@ -1,3 +1,2 @@
-aiogram>=3.31.0,<4
-aiohttp>=3.9,<4
+aiogram>=3,<4
 python-dotenv>=1,<2
