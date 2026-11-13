@@ -1,25 +1,35 @@
-from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message
+from html import escape
 
-from app.catalog import CAFES, MENU, PRICES
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+
+from app import settings
+from app.catalog import CAFES, CATEGORIES, PRODUCTS, get_drink
 from app.keyboards import (
-    cafes_keyboard, drinks_keyboard, breaks_keyboard,
-    confirmation_keyboard, order_keyboard,
+    cafes_keyboard, categories_keyboard, drinks_keyboard, sizes_keyboard,
+    milk_keyboard, breaks_keyboard, confirmation_keyboard, comment_keyboard, order_keyboard,
+    button,
 )
 from app.schedule import available_breaks, closed_message, daily_breaks, local_now
-from app.services.orders import OrderError, orders
+from app.services.orders import MAX_COMMENT_LENGTH, Draft, OrderError, orders
+from app.services.cafes import CafeError, cafes
+from app.notifications import notify_staff
+from app.ui import order_text, show
 
 router = Router()
+# Число частей callback_data: действие, кофейня, выбор (если есть), сессия.
+MENU_ACTIONS = {"cafe": 3, "category": 4, "product": 4, "size": 4, "drink": 4, "pickup": 5}
+
+
+def mode_label() -> str:
+    return "По расписанию пар" if settings.FOLLOW_SCHEDULE else "🧪 Тестовый режим · в любое время"
 
 
 async def check_session(callback: CallbackQuery, session: str) -> bool:
     if orders.valid_session(callback.from_user.id, session):
         return True
-    if isinstance(callback.message, Message):
-        await callback.message.answer(
-            "Эти кнопки устарели. Начните новый заказ.", reply_markup=order_keyboard()
-        )
+    await show(callback, "Эти кнопки устарели. Начните новый заказ.")
     return False
 
 
@@ -29,28 +39,29 @@ async def show_cafes(message: Message, user_id: int):
     if not available_breaks(now):
         await message.answer(closed_message(now), reply_markup=order_keyboard())
         return
-    await message.answer("Выберите кофейню!", reply_markup=cafes_keyboard(session))
+    await message.answer(
+        f"<b>☕ Кофе к перерыву</b>\n{mode_label()}\n\nВыберите кофейню:",
+        reply_markup=cafes_keyboard(session), parse_mode="HTML",
+    )
 
 
-@router.message(CommandStart())
+@router.message(Command("student"))
 async def start(message: Message):
-    orders.cancel(message.from_user.id)
     await show_cafes(message, message.from_user.id)
 
 
 @router.message(Command("schedule"))
 async def schedule(message: Message):
     now = local_now()
-    lines = ["Расписание на сегодня:"]
+    lines = [f"{mode_label()}\nРасписание (Новосибирск):"]
     for item in daily_breaks(now.date()):
-        lines.append(f"{item.label}; заказы {item.opens_at:%H:%M}–{item.closes_at:%H:%M} (до)")
+        lines.append(f"{item.label}; приём {item.opens_at:%H:%M}–{item.closes_at:%H:%M} (до)")
     await message.answer("\n".join(lines), reply_markup=order_keyboard())
 
 
 @router.callback_query(F.data == "new_order")
 async def new_order(callback: CallbackQuery):
     await callback.answer()
-    orders.cancel(callback.from_user.id)
     if isinstance(callback.message, Message):
         await show_cafes(callback.message, callback.from_user.id)
 
@@ -61,98 +72,237 @@ async def cancel_order(callback: CallbackQuery):
     if not await check_session(callback, callback.data.split(":", 1)[1]):
         return
     orders.cancel(callback.from_user.id)
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Оформление отменено.", reply_markup=order_keyboard())
+    await show(callback, "Оформление отменено.")
 
 
-@router.callback_query(F.data.startswith("cafe:"))
-async def cafe_callback(callback: CallbackQuery):
-    await callback.answer()
-    if not isinstance(callback.message, Message):
-        return
-    now = local_now()
-    if not available_breaks(now):
-        await callback.message.answer(closed_message(now), reply_markup=order_keyboard())
-        return
-    parts = callback.data.split(":")
-    if len(parts) != 3 or not await check_session(callback, parts[-1]):
-        return
-    _, cafe_id, session = parts
-    if cafe_id not in CAFES:
-        await callback.message.answer("Неизвестная кофейня!")
-        return
-    await callback.message.answer(
-        f"Вы выбрали кофейню {CAFES[cafe_id]}. Теперь выберите напиток:",
-        reply_markup=drinks_keyboard(cafe_id, session),
+def comment_line(draft: Draft) -> str:
+    return f"💬 Комментарий: {escape(draft.comment) if draft.comment else 'без пожеланий'}\n"
+
+
+async def show_draft(target: CallbackQuery | Message, draft: Draft, session: str):
+    deadline = (
+        "🧪 Без ограничений по расписанию."
+        if draft.pickup.id == "test"
+        else f"Подтвердите до <b>{draft.pickup.closes_at:%H:%M}</b> (Новосибирск)."
     )
+    text = (
+        f"<b>🧾 Проверьте заказ</b>\n\n"
+        f"☕ {escape(draft.cafe_name)}\n{escape(draft.drink_name)}\n"
+        f"{comment_line(draft)}"
+        f"<b>Итого: {draft.price} ₽</b>\n\n{draft.pickup.label}\n{deadline}\n\n"
+        "Тестовый заказ. Оплата пока не подключена."
+    )
+    keyboard = confirmation_keyboard(draft.token, session)
+    if isinstance(target, Message):
+        await target.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    else:
+        await show(target, text, keyboard)
 
 
-@router.callback_query(F.data.startswith("drink:"))
-async def drink_callback(callback: CallbackQuery):
-    await callback.answer()
-    if not isinstance(callback.message, Message):
+async def prepare_order(
+    callback: CallbackQuery, cafe_id: str, sku: str, break_id: str, session: str,
+):
+    try:
+        draft = orders.prepare(callback.from_user.id, cafe_id, sku, break_id, local_now())
+    except OrderError as error:
+        await show(callback, escape(str(error)))
         return
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.message.answer("Начните новый заказ.")
-        return
-    if not await check_session(callback, parts[-1]):
-        return
-    _, cafe_id, drink_id, session = parts
-    drink_name = MENU.get(cafe_id, {}).get(drink_id)
-    if drink_name is None:
-        await callback.message.answer("Такого напитка нет в меню.")
+    await show_draft(callback, draft, session)
+
+
+async def select_drink(callback: CallbackQuery, cafe_id: str, sku: str, session: str):
+    if not settings.FOLLOW_SCHEDULE:
+        await prepare_order(callback, cafe_id, sku, "test", session)
         return
     now = local_now()
     available = available_breaks(now)
     if not available:
-        await callback.message.answer(closed_message(now), reply_markup=order_keyboard())
+        await show(callback, closed_message(now))
         return
-    await callback.message.answer(
-        f"{drink_name} — {PRICES[cafe_id][drink_id]} ₽. Выберите перерыв для получения:",
-        reply_markup=breaks_keyboard(cafe_id, drink_id, available, session),
+    drink = get_drink(cafe_id, sku)
+    if drink is None:
+        await show(callback, "Напиток больше недоступен.")
+        return
+    await show(
+        callback,
+        f"<b>{escape(drink.name)}</b>\n{drink.price} ₽\n\nВыберите перерыв:",
+        breaks_keyboard(cafe_id, sku, available, session),
     )
 
 
-@router.callback_query(F.data.startswith("pickup:"))
-async def pickup_callback(callback: CallbackQuery):
+@router.callback_query(F.data.regexp(r"^(" + "|".join(MENU_ACTIONS) + r"):"))
+async def menu_callback(callback: CallbackQuery):
     await callback.answer()
-    if not isinstance(callback.message, Message):
-        return
     parts = callback.data.split(":")
-    if len(parts) != 5:
-        await callback.message.answer("Начните новый заказ.")
+    action = parts[0]
+    if len(parts) != MENU_ACTIONS.get(action):
+        await show(callback, "Эти кнопки устарели. Начните новый заказ.")
         return
     if not await check_session(callback, parts[-1]):
         return
-    _, cafe_id, drink_id, break_id, session = parts
-    try:
-        draft = orders.prepare(callback.from_user.id, cafe_id, drink_id, break_id, local_now())
-    except OrderError as error:
-        await callback.message.answer(str(error), reply_markup=order_keyboard())
+    cafe_id, session = parts[1], parts[-1]
+    if cafe_id not in CAFES:
+        await show(callback, "Кофейня недоступна.")
         return
-    await callback.message.answer(
-        f"Проверьте тестовый заказ:\n{CAFES[cafe_id]} — {MENU[cafe_id][drink_id]}\n"
-        f"Сумма: {draft.price} ₽\n{draft.pickup.label}\n"
-        f"Подтвердите до {draft.pickup.closes_at:%H:%M} (Новосибирск).",
-        reply_markup=confirmation_keyboard(draft.token, session),
-    )
+    if not cafes.is_open(cafe_id):
+        await show(callback, "Кофейня временно остановила приём. Выберите другую кофейню.")
+        return
+    now = local_now()
+    if not available_breaks(now):
+        await show(callback, closed_message(now))
+        return
+    cafe_name = escape(CAFES[cafe_id])
+    if action == "cafe":
+        await show(callback, f"<b>☕ {cafe_name}</b>\n\nЧто приготовим? Выберите раздел:",
+                   categories_keyboard(cafe_id, session))
+    elif action == "category":
+        category = parts[2]
+        if category not in CATEGORIES:
+            await show(callback, "Раздел меню больше недоступен.")
+            return
+        has_drinks = any(product.category == category and cafes.is_available(cafe_id, product_id)
+                         for product_id, product in PRODUCTS[cafe_id].items())
+        prompt = "Выберите напиток:" if has_drinks else "В этом разделе пока нет доступных напитков."
+        await show(callback, f"<b>{cafe_name} · {CATEGORIES[category]}</b>\n\n{prompt}",
+                   drinks_keyboard(cafe_id, category, session))
+    elif action == "product":
+        product_id = parts[2]
+        product = PRODUCTS[cafe_id].get(product_id)
+        if product is None:
+            await show(callback, "Напиток больше недоступен.")
+            return
+        await show(callback, f"<b>{escape(product.name)}</b>\n{cafe_name}\n\nВыберите объём:",
+                   sizes_keyboard(cafe_id, product_id, session))
+    elif action in {"size", "drink"}:
+        sku = parts[2]
+        drink = get_drink(cafe_id, sku)
+        if drink is None:
+            await show(callback, "Напиток больше недоступен.")
+            return
+        try:
+            cafes.require_orderable(cafe_id, sku)
+        except CafeError as error:
+            await show(callback, escape(str(error)))
+            return
+        if action == "size" and drink.product.alternative_milk and not sku.endswith("a"):
+            await show(callback, f"<b>{escape(drink.name)}</b>\n\nВыберите молоко:",
+                       milk_keyboard(cafe_id, sku, session))
+        else:
+            await select_drink(callback, cafe_id, sku, session)
+    elif action == "pickup":
+        await prepare_order(callback, cafe_id, parts[2], parts[3], session)
 
 
 @router.callback_query(F.data.startswith("confirm:"))
 async def confirm_callback(callback: CallbackQuery):
     await callback.answer()
-    if not isinstance(callback.message, Message):
+    token = callback.data.split(":", 1)[1]
+    already_confirmed = token in orders.confirmed
+    try:
+        order = orders.confirm(callback.from_user.id, token, local_now())
+    except OrderError as error:
+        user_id = callback.from_user.id
+        waiting_token = orders.waiting_comments.get(user_id)
+        keyboard = (
+            comment_keyboard(waiting_token, orders.sessions[user_id])
+            if waiting_token else order_keyboard()
+        )
+        await show(callback, escape(str(error)), keyboard)
+        return
+    await show(
+        callback,
+        order_text(order) + "\n\nСтатусы можно проверить в разделе «Мои заказы». Оплата пока не подключена.",
+        order_keyboard(),
+    )
+    if not already_confirmed:
+        await notify_staff(callback.bot, order)
+
+
+async def show_my_orders(target: Message | CallbackQuery, user_id: int):
+    recent = orders.for_user(user_id)[:5]
+    lines = ["<b>📋 Мои последние заказы</b>"] + [order_text(order) for order in recent]
+    if not recent:
+        lines.append("Заказов пока нет.")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [button(f"Открыть №{order.number}", f"student_order:{order.number}")] for order in recent
+    ] + order_keyboard().inline_keyboard)
+    text = "\n\n".join(lines)
+    if isinstance(target, Message):
+        await target.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    else:
+        await show(target, text, keyboard)
+
+
+@router.message(Command("myorders"))
+async def my_orders_command(message: Message):
+    await show_my_orders(message, message.from_user.id)
+
+
+@router.callback_query(F.data == "my_orders")
+async def my_orders_callback(callback: CallbackQuery):
+    await callback.answer()
+    await show_my_orders(callback, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("student_order:"))
+async def student_order(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        order = orders.get_order(int(callback.data.split(":", 1)[1]))
+        if order.draft.user_id != callback.from_user.id:
+            raise OrderError("Этот заказ принадлежит другому пользователю.")
+    except (OrderError, ValueError) as error:
+        await show(callback, escape(str(error)))
+        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [button("↻ Обновить статус", f"student_order:{order.number}")],
+    ] + order_keyboard().inline_keyboard)
+    await show(callback, order_text(order), keyboard)
+
+
+@router.callback_query(F.data.startswith("comment:"))
+async def add_comment(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        draft = orders.start_comment(callback.from_user.id, callback.data.split(":", 1)[1], local_now())
+    except OrderError as error:
+        await show(callback, escape(str(error)))
+        return
+    await show(
+        callback,
+        f"<b>💬 Пожелания к напитку</b>\n\nНапишите сообщение, например: «со льдом» или «без сахара».\n"
+        f"До {MAX_COMMENT_LENGTH} символов.\n\n{comment_line(draft)}",
+        comment_keyboard(draft.token, orders.sessions[draft.user_id]),
+    )
+
+
+@router.callback_query(F.data.startswith("skip_comment:"))
+async def skip_comment(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        draft = orders.save_comment(callback.from_user.id, callback.data.split(":", 1)[1], None, local_now())
+    except OrderError as error:
+        await show(callback, escape(str(error)))
+        return
+    await show_draft(callback, draft, orders.sessions[draft.user_id])
+
+
+@router.message(F.text & ~F.text.startswith("/"))
+async def receive_comment(message: Message):
+    user_id = message.from_user.id
+    token = orders.waiting_comments.get(user_id)
+    if token is None:
+        await message.answer("Для пожеланий откройте заказ и нажмите «Добавить / изменить комментарий».")
         return
     try:
-        order = orders.confirm(callback.from_user.id, callback.data.split(":", 1)[1], local_now())
+        draft = orders.save_comment(user_id, token, message.text, local_now())
     except OrderError as error:
-        await callback.message.answer(str(error), reply_markup=order_keyboard())
+        await message.answer(str(error))
         return
-    draft = order.draft
-    await callback.message.answer(
-        f"Тестовый заказ №{order.number} сохранён.\n"
-        f"{draft.cafe_name} — {draft.drink_name}, {draft.price} ₽\n"
-        f"{draft.pickup.label}\nоплата и передача заказа бариста пока не подключены.",
-        reply_markup=order_keyboard(),
-    )
+    await show_draft(message, draft, orders.sessions[user_id])
+
+
+@router.message()
+async def unsupported_comment(message: Message):
+    if message.from_user and message.from_user.id in orders.waiting_comments:
+        await message.answer("Отправьте пожелание обычным текстом, например: «со льдом».")

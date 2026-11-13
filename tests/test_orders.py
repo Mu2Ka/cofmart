@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from datetime import date, datetime, timedelta
 
 from app.schedule import LOCAL_TIMEZONE, available_breaks, daily_breaks
@@ -10,6 +11,11 @@ def at(hour, minute=0, second=0):
 
 
 class ScheduleTests(unittest.TestCase):
+    def setUp(self):
+        mode = patch('app.settings.FOLLOW_SCHEDULE', True)
+        mode.start()
+        self.addCleanup(mode.stop)
+
     def test_five_pairs_and_no_break_after_last_pair(self):
         breaks = daily_breaks(date(2026, 11, 13))
         self.assertEqual([item.starts_at.strftime('%H:%M') for item in breaks],
@@ -35,11 +41,14 @@ class ScheduleTests(unittest.TestCase):
 
 class OrderTests(unittest.TestCase):
     def setUp(self):
+        mode = patch('app.settings.FOLLOW_SCHEDULE', True)
+        mode.start()
+        self.addCleanup(mode.stop)
         self.service = OrderService()
         self.break_id = daily_breaks(at(9).date())[0].id
 
     def prepare(self):
-        return self.service.prepare(1, '1', '1', self.break_id, at(9, 20))
+        return self.service.prepare(1, '1', '4_350', self.break_id, at(9, 20))
 
     def test_confirm_rechecks_deadline(self):
         draft = self.prepare()
@@ -62,7 +71,7 @@ class OrderTests(unittest.TestCase):
     def test_yesterday_button_and_cancelled_draft(self):
         yesterday = daily_breaks(at(9).date() - timedelta(days=1))[0].id
         with self.assertRaises(OrderError):
-            self.service.prepare(1, '1', '1', yesterday, at(9, 20))
+            self.service.prepare(1, '1', '4_350', yesterday, at(9, 20))
         draft = self.prepare()
         self.service.cancel(1)
         with self.assertRaises(OrderError):
@@ -94,16 +103,15 @@ class OrderTests(unittest.TestCase):
         self.assertFalse(self.service.valid_session(1, second_session))
 
     def test_order_keeps_name_and_price_snapshot(self):
-        from app.catalog import MENU
+        from app.catalog import PRODUCTS
         draft = self.prepare()
         order = self.service.confirm(1, draft.token, at(9, 25))
-        original = MENU['1'].pop('1')
-        try:
+        # Уже принятый заказ должен отображаться даже после удаления позиции из меню.
+        with patch.dict(PRODUCTS['1'], {}, clear=True):
             repeated = self.service.confirm(1, draft.token, at(9, 30))
-            self.assertEqual(repeated.draft.drink_name, original)
+            self.assertEqual(repeated.draft.drink_name, order.draft.drink_name)
             self.assertEqual(repeated.draft.price, order.draft.price)
-        finally:
-            MENU['1']['1'] = original
+
 
 
 if __name__ == '__main__':
