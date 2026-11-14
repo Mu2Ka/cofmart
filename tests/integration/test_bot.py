@@ -17,7 +17,7 @@ async def test_old_callbacks_and_full_checkout_without_api(db):
     real_session = bot.session
     bot.session = AsyncMock()
     dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
-    middleware = ServicesMiddleware(db.sessions)
+    middleware = ServicesMiddleware(db.sessions, mini_app_url="https://mini.example")
     dp.message.middleware(middleware)
     dp.callback_query.middleware(middleware)
     dp.include_routers(student.router, orders.router)
@@ -60,6 +60,9 @@ async def test_old_callbacks_and_full_checkout_without_api(db):
         first_buttons = messages[0].reply_markup.inline_keyboard
         assert first_buttons[0][0].callback_data == "cafe:1"
         assert first_buttons[1][0].callback_data == "cafe:2"
+        # Web App buttons open Telegram's embedded view, unlike ordinary URL buttons.
+        assert first_buttons[-1][0].web_app.url == "https://mini.example"
+        assert first_buttons[-1][0].url is None
     finally:
         await dp.storage.close()
         await dp.fsm.events_isolation.close()
