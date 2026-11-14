@@ -1,15 +1,12 @@
 import asyncio
 import logging
-import os
-from pathlib import Path
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import BotCommand
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 
-from app.bot.handlers import orders, student
-from app.bot.middlewares import ServicesMiddleware
-from app.config import get_bot_token, get_settings
-from app.db.session import Database
+from app.config import get_bot_token
 from app.process_lock import AlreadyRunningError, bot_lock
 
 
@@ -19,28 +16,43 @@ async def main():
         await run_bot(token)
 
 
-async def run_bot(token):
-    settings = get_settings()
-    db = Database(settings.database_url)
-    dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
-    def mini_app_url():
-        if os.getenv('COFMART_LOCAL_RUNTIME') == '1':
-            path = Path(__file__).resolve().parents[2] / '.local' / 'mini-app-url.txt'
-            if path.exists():
-                return path.read_text(encoding='utf-8').strip()
-        return settings.mini_app_url
+async def configure_commands(bot):
+    commands = [
+        ('start','Выбрать роль'), ('student','Заказать кофе'), ('myorders','Мои заказы и статусы'),
+        ('favorites','Избранные напитки'), ('repeat','Повторить прошлый заказ'),
+        ('barista','Рабочая панель баристы'), ('admin','Панель администратора'),
+        ('roles','Сменить роль'), ('myid','Узнать свой Telegram ID'), ('schedule','Расписание и режим'),
+    ]
+    await bot.set_my_commands([BotCommand(command=name,description=label) for name,label in commands])
 
-    services = ServicesMiddleware(db.sessions, mini_app_url)
-    dp.message.middleware(services)
-    dp.callback_query.middleware(services)
-    dp.include_routers(student.router, orders.router)
+
+async def run_bot(token):
+    from app.bot.flows import entry, student, staff, customer
+    from app.bot.full_middlewares import install_ban_middleware, install_database_middleware
+    from app.bot.message_cleanup import message_cleanup_worker
+    from app.ordering.persistent import orders as full_orders
+    from app.ordering.roles import roles
+    from app.ordering.bans import bans
+    from app.db.ordering_connection import close
+    roles.validate_configuration()
+    bans.validate_configuration()
+    dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
+    install_ban_middleware(dp, cancel_order=full_orders.cancel)
+    install_database_middleware(dp)
+    dp.message.filter(F.chat.type == 'private')
+    dp.callback_query.filter(F.message.chat.type == 'private')
+    dp.include_routers(entry.router, staff.router, customer.router, student.router)
     try:
-        async with Bot(token=token) as bot:
-            await dp.start_polling(bot)
+        async with Bot(token=token) as bot, message_cleanup_worker(bot):
+            try:
+                await configure_commands(bot)
+            except TelegramAPIError:
+                logging.warning('Не удалось обновить меню команд; продолжаем запуск.')
+            await dp.start_polling(bot, close_bot_session=False)
     finally:
         await dp.storage.close()
         await dp.fsm.events_isolation.close()
-        await db.close()
+        await close()
 
 
 if __name__ == "__main__":

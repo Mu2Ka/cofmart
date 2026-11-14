@@ -13,3 +13,4 @@ coverage/
 *.db
 .qa/
 .local/
+app/local_settings.py

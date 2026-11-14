@@ -11,7 +11,9 @@ from app.db.session import Database
 async def db(tmp_path):
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
     async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[
+            table for table in Base.metadata.sorted_tables if not table.name.startswith('flow_')
+        ]))
     await seed(database.sessions)
     async with database.sessions() as session, session.begin():
         session.add(PickupSlot(id=1, cafe_id=1, starts_at=datetime.now(timezone.utc) + timedelta(hours=2), capacity=2))

@@ -234,6 +234,7 @@ def serve():
         asyncio.run(prepare_database(url))
         run(sys.executable, '-m', 'alembic', 'upgrade', 'head')
         run(sys.executable, '-m', 'app.db.seed')
+        run(sys.executable, '-m', 'app.ordering.seed')
         start = (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(second=0, microsecond=0)
         for cafe in asyncio.run(cafes_without_times(settings)):
             run(sys.executable, '-m', 'app.db.manage', 'add-slots', '--cafe-id', cafe,

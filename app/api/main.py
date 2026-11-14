@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.api.routers import catalog, orders, slots
+from app.api.routers import flow
 from app.config import Settings, get_settings
 from app.db.session import Database
 from app.services.errors import BusinessError
@@ -17,6 +18,10 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
         config = settings or get_settings()
         if not config.bot_token:
             raise RuntimeError("Добавьте API_BOT для проверки Telegram initData")
+        from app.ordering.roles import roles
+        from app.ordering.bans import bans
+        roles.validate_configuration()
+        bans.validate_configuration()
         app.state.settings = config
         app.state.db = database or Database(config.database_url)
         try:
@@ -47,4 +52,10 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     application.include_router(catalog.router)
     application.include_router(slots.router)
     application.include_router(orders.router)
+    application.include_router(flow.router)
+
+    @application.exception_handler(ValueError)
+    async def workflow_error(request, exc):
+        from app.ordering.roles import AccessError
+        return JSONResponse(status_code=403 if isinstance(exc, AccessError) else 409, content={'detail': str(exc)})
     return application

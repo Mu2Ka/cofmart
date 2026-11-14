@@ -1,0 +1,150 @@
+.flow-intro {
+  padding: 30px 0;
+}
+.summary-counts {
+  display: block;
+  font-size: 11px;
+  margin-top: 8px;
+  font-weight: 500;
+}
+.flow-intro h1 {
+  font-size: 38px;
+  letter-spacing: -1.8px;
+  margin: 12px 0;
+}
+.muted {
+  color: #737e69;
+  font-size: 13px;
+}
+.flow-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.flow-fieldset:disabled {
+  opacity: 0.7;
+}
+.flow-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 18px 0;
+}
+.secondary {
+  background: #e6e9dd;
+  color: #344d3c;
+}
+.product-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 20px 0;
+}
+.product-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  text-align: left;
+  background: #fffdf7;
+  color: #344d3c;
+  border: 1px solid #d8dacf;
+  padding: 17px;
+}
+.product-row span:last-child {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 13px;
+  margin: 18px 0;
+}
+.field input,
+.field textarea {
+  font: inherit;
+  padding: 12px;
+  border: 1px solid #c9cfbf;
+  border-radius: 8px;
+  background: #fffef8;
+  color: #27392c;
+  width: 100%;
+  box-sizing: border-box;
+}
+.field textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+.field small {
+  color: #75816b;
+}
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0;
+}
+.tabs button {
+  padding: 9px 12px;
+  font-size: 12px;
+}
+.flow-heading {
+  margin-top: 32px;
+}
+.bottom-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 30px;
+  padding: 12px 0;
+  border-top: 1px solid #d8dacf;
+}
+.local-notice {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid #aebc9d;
+  background: #e6ecd9;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.rating {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.rating button {
+  padding: 10px;
+}
+.rating .selected {
+  background: #344d3c;
+  color: white;
+}
+fieldset[disabled] .quiet {
+  cursor: default;
+}
+@media (max-width: 500px) {
+  .flow-intro {
+    padding: 24px 0;
+  }
+  .flow-intro h1 {
+    font-size: 31px;
+  }
+  .product-row {
+    padding: 13px;
+    font-size: 14px;
+  }
+  .product-row span:last-child {
+    font-size: 11px;
+  }
+  .bottom-nav button {
+    font-size: 11px;
+  }
+  .flow-fieldset .review {
+    padding: 18px;
+  }
+}

@@ -30,13 +30,13 @@ async def test_api_order_visible_in_shared_service_and_vice_versa(client, db):
     assert len((await client.get("/cafes/1/slots", headers=headers)).json()) == 1
     cart = {"cafe_id": 1, "items": [{"menu_item_id": 1, "quantity": 2}]}
     preview = await client.post("/orders/preview", headers=headers, json=cart)
-    assert preview.json()["total_minor"] == 57000
+    assert preview.status_code == 410
     payload = {**cart, "slot_id": 1, "expected_total_minor": 57000, "idempotency_key": "api-1"}
     response = await client.post("/orders", headers=headers, json=payload)
-    assert response.status_code == 200, response.text
-    order = response.json()
-    assert (await client.post("/orders", headers=headers, json=payload)).json()["id"] == order["id"]
+    assert response.status_code == 410
     service = OrderService(db.sessions)
+    old_order = await service.create(1001, OrderCommand(1, 1, [ItemInput(1, 2)], 57000, "legacy-import"))
+    order = {'id': old_order.id}
     assert (await service.get(1001, order["id"])).total_minor == 57000
     bot_order = await service.create(1001, OrderCommand(1, 1, [ItemInput(2, 1)], 16000, "bot-1"))
     history = (await client.get("/orders", headers=headers)).json()
@@ -50,8 +50,7 @@ async def test_client_cannot_override_owner_or_price(client):
     payload = {"cafe_id": 1, "slot_id": 1, "items": [{"menu_item_id": 1, "quantity": 1}],
                "expected_total_minor": 1, "idempotency_key": "bad-price"}
     response = await client.post("/orders", headers=headers, json=payload)
-    assert response.status_code == 409
-    assert response.json()["code"] == "PRICE_CHANGED"
+    assert response.status_code == 410
     assert (await client.post("/orders", headers=headers, json={**payload, "user_id": 999})).status_code == 422
     assert (await client.post("/orders", headers=headers, json={**payload, "items": [{"menu_item_id": 1, "quantity": True}]})).status_code == 422
 

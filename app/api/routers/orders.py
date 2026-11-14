@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.dependencies import current_user, orders
 from app.api.schemas import OrderRequest, PreviewRequest
@@ -8,14 +8,14 @@ from app.services.orders import OrderService
 router = APIRouter(prefix="/orders")
 
 
-@router.post("/preview", response_model=PreviewData)
+@router.post("/preview", response_model=PreviewData, deprecated=True)
 async def preview(body: PreviewRequest, user: int = Depends(current_user), service: OrderService = Depends(orders)):
-    return await service.preview(body.cafe_id, body.item_inputs())
+    raise HTTPException(410, 'Оформление обновлено. Переоткройте Mini App; новые заказы используют /flow/action.')
 
 
-@router.post("", response_model=OrderData)
+@router.post("", response_model=OrderData, deprecated=True)
 async def create(body: OrderRequest, user: int = Depends(current_user), service: OrderService = Depends(orders)):
-    return await service.create(user, body.command())
+    raise HTTPException(410, 'Оформление обновлено. Переоткройте Mini App; новые заказы используют /flow/action.')
 
 
 @router.get("", response_model=list[OrderData])

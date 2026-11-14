@@ -4,6 +4,7 @@ from alembic import context
 
 from app.config import get_settings
 from app.db.models import Base
+from app.db import ordering_models  # Shared bot/Mini App workflow tables.
 from app.db.session import Database
 
 
