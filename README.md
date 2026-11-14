@@ -110,6 +110,14 @@ python -m app.db.manage add-slots --cafe-id 3 --start "2026-11-15T10:00:00+07:00
 
 ## Docker Compose
 
+На Windows для первого запуска доступен скрипт PowerShell:
+
+```powershell
+.\scripts\start.ps1 -Initialize -DemoSlots
+```
+
+Перед этим установите и запустите Docker Desktop, настройте `.env` по инструкции ниже. `-Initialize` применяет миграции и импортирует каталог; `-DemoSlots` создаёт демонстрационные слоты на ближайшие часы для двух начальных кофеен. Без этих флагов скрипт только запускает приложения: `.\scripts\start.ps1`. Скрипт находит Docker даже в терминале со старым PATH. Если Docker требует перезагрузку Windows, сначала сохраните работу и перезагрузитесь.
+
 Установите в `.env` `POSTGRES_PASSWORD`, соответствующий `DATABASE_URL_DOCKER` (хост `db`), `API_BOT`, а также публичные frontend/API URL для production. Если пароль содержит специальные символы, кодируйте его в URL.
 
 ```sh
