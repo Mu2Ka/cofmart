@@ -9,11 +9,14 @@ def button(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
 
 
-def cafes_keyboard(session: str) -> InlineKeyboardMarkup:
+def cafes_keyboard(session: str, counts: dict[str, tuple[int, int]] | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [button(f"{'☕' if cafes.is_open(cafe_id) else '⏸'} {name}", f"cafe:{cafe_id}:{session}")]
+        [button(f"{'☕' if cafes.is_open(cafe_id) else '⏸'} {name}"
+                + (f" · свободно {counts[cafe_id][0]}/{counts[cafe_id][1]}" if counts else ""),
+                f"cafe:{cafe_id}:{session}")]
         for cafe_id, name in CAFES.items()
-    ])
+    ] + [[button("↻ Обновить слоты", "new_order")],
+         [button("⭐ Избранное", "favorites:0"), button("↻ Повторить", "repeat_last")]])
 
 
 def categories_keyboard(cafe_id: str, session: str) -> InlineKeyboardMarkup:
@@ -60,14 +63,18 @@ def milk_keyboard(cafe_id: str, sku: str, session: str) -> InlineKeyboardMarkup:
 def order_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [button("☕ Новый заказ", "new_order")],
+        [button("↻ Повторить прошлый заказ", "repeat_last")],
+        [button("⭐ Избранные напитки", "favorites:0")],
         [button("📋 Мои заказы", "my_orders")],
         [button("← Выбор роли", "roles")],
     ])
 
 
-def breaks_keyboard(cafe_id: str, drink_id: str, breaks: list[Break], session: str) -> InlineKeyboardMarkup:
+def breaks_keyboard(cafe_id: str, drink_id: str, breaks: list[Break], session: str,
+                    counts: dict[str, tuple[int, int]] | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [button(item.label, f"pickup:{cafe_id}:{drink_id}:{item.id}:{session}")]
+        [button(item.label + (f" · {counts[item.id][0]}/{counts[item.id][1]} свободно" if counts else ""),
+                f"pickup:{cafe_id}:{drink_id}:{item.id}:{session}")]
         for item in breaks
     ] + [[button("✕ Отменить", f"cancel_order:{session}")]])
 
@@ -75,6 +82,7 @@ def breaks_keyboard(cafe_id: str, drink_id: str, breaks: list[Break], session: s
 def confirmation_keyboard(token: str, session: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [button("✎ Добавить / изменить комментарий", f"comment:{token}")],
+        [button("⭐ В избранное", f"favorite_draft:{token}")],
         [button("✓ Подтвердить тестовый заказ", f"confirm:{token}")],
         [button("✕ Отменить", f"cancel_order:{session}")],
     ])

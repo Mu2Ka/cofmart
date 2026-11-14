@@ -16,6 +16,7 @@ from app.services.orders import MAX_COMMENT_LENGTH, Draft, OrderError, orders
 from app.services.cafes import CafeError, cafes
 from app.notifications import notify_staff
 from app.ui import order_text, show
+from app.customer_keyboards import student_order_keyboard
 
 router = Router()
 # Число частей callback_data: действие, кофейня, выбор (если есть), сессия.
@@ -36,12 +37,17 @@ async def check_session(callback: CallbackQuery, session: str) -> bool:
 async def show_cafes(message: Message, user_id: int):
     session = orders.begin(user_id)
     now = local_now()
-    if not available_breaks(now):
+    available = available_breaks(now)
+    if not available:
         await message.answer(closed_message(now), reply_markup=order_keyboard())
         return
+    counts = {}
+    for cafe_id in CAFES:
+        summary = orders.slots(cafe_id, available[0].id, now)
+        counts[cafe_id] = (summary.free if cafes.is_open(cafe_id) else 0, summary.limit)
     await message.answer(
-        f"<b>☕ Кофе к перерыву</b>\n{mode_label()}\n\nВыберите кофейню:",
-        reply_markup=cafes_keyboard(session), parse_mode="HTML",
+        f"<b>☕ Кофе к перерыву</b>\n{mode_label()}\n{available[0].label}\n\nВыберите кофейню:",
+        reply_markup=cafes_keyboard(session, counts), parse_mode="HTML",
     )
 
 
@@ -82,7 +88,7 @@ def comment_line(draft: Draft) -> str:
 async def show_draft(target: CallbackQuery | Message, draft: Draft, session: str):
     deadline = (
         "🧪 Без ограничений по расписанию."
-        if draft.pickup.id == "test"
+        if draft.pickup.is_test
         else f"Подтвердите до <b>{draft.pickup.closes_at:%H:%M}</b> (Новосибирск)."
     )
     text = (
@@ -90,6 +96,7 @@ async def show_draft(target: CallbackQuery | Message, draft: Draft, session: str
         f"☕ {escape(draft.cafe_name)}\n{escape(draft.drink_name)}\n"
         f"{comment_line(draft)}"
         f"<b>Итого: {draft.price} ₽</b>\n\n{draft.pickup.label}\n{deadline}\n\n"
+        f"Один слот зарезервирован за вами до <b>{draft.reserved_until:%H:%M:%S}</b>.\n"
         "Тестовый заказ. Оплата пока не подключена."
     )
     keyboard = confirmation_keyboard(draft.token, session)
@@ -112,7 +119,7 @@ async def prepare_order(
 
 async def select_drink(callback: CallbackQuery, cafe_id: str, sku: str, session: str):
     if not settings.FOLLOW_SCHEDULE:
-        await prepare_order(callback, cafe_id, sku, "test", session)
+        await prepare_order(callback, cafe_id, sku, available_breaks(local_now())[0].id, session)
         return
     now = local_now()
     available = available_breaks(now)
@@ -123,10 +130,14 @@ async def select_drink(callback: CallbackQuery, cafe_id: str, sku: str, session:
     if drink is None:
         await show(callback, "Напиток больше недоступен.")
         return
+    counts = {}
+    for item in available:
+        summary = orders.slots(cafe_id, item.id, now)
+        counts[item.id] = (summary.free, summary.limit)
     await show(
         callback,
         f"<b>{escape(drink.name)}</b>\n{drink.price} ₽\n\nВыберите перерыв:",
-        breaks_keyboard(cafe_id, sku, available, session),
+        breaks_keyboard(cafe_id, sku, available, session, counts),
     )
 
 
@@ -151,9 +162,20 @@ async def menu_callback(callback: CallbackQuery):
     if not available_breaks(now):
         await show(callback, closed_message(now))
         return
+    # Нельзя подтвердить прежний напиток, когда пользователь уже вернулся в меню.
+    orders.discard_draft(callback.from_user.id)
     cafe_name = escape(CAFES[cafe_id])
     if action == "cafe":
-        await show(callback, f"<b>☕ {cafe_name}</b>\n\nЧто приготовим? Выберите раздел:",
+        pickup = available_breaks(now)[0]
+        summary = orders.slots(cafe_id, pickup.id, now)
+        if summary.free == 0:
+            await show(callback, f"<b>{cafe_name}</b>\nНа этот перерыв свободно 0/{summary.limit} слотов. "
+                       "Выберите другую кофейню или обновите слоты.", cafes_keyboard(session, {
+                           cid: (orders.slots(cid, pickup.id, now).free if cafes.is_open(cid) else 0,
+                                 orders.slots(cid, pickup.id, now).limit) for cid in CAFES
+                       }))
+            return
+        await show(callback, f"<b>☕ {cafe_name}</b>\nСвободно {summary.free}/{summary.limit} слотов.\n\nЧто приготовим? Выберите раздел:",
                    categories_keyboard(cafe_id, session))
     elif action == "category":
         category = parts[2]
@@ -209,13 +231,13 @@ async def confirm_callback(callback: CallbackQuery):
         )
         await show(callback, escape(str(error)), keyboard)
         return
+    if not already_confirmed:
+        await notify_staff(callback.bot, order)
     await show(
         callback,
         order_text(order) + "\n\nСтатусы можно проверить в разделе «Мои заказы». Оплата пока не подключена.",
-        order_keyboard(),
+        student_order_keyboard(order),
     )
-    if not already_confirmed:
-        await notify_staff(callback.bot, order)
 
 
 async def show_my_orders(target: Message | CallbackQuery, user_id: int):
@@ -224,7 +246,7 @@ async def show_my_orders(target: Message | CallbackQuery, user_id: int):
     if not recent:
         lines.append("Заказов пока нет.")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [button(f"Открыть №{order.number}", f"student_order:{order.number}")] for order in recent
+        [button(f"Открыть №{order.number}", f"student_order:{order.reference}")] for order in recent
     ] + order_keyboard().inline_keyboard)
     text = "\n\n".join(lines)
     if isinstance(target, Message):
@@ -248,16 +270,11 @@ async def my_orders_callback(callback: CallbackQuery):
 async def student_order(callback: CallbackQuery):
     await callback.answer()
     try:
-        order = orders.get_order(int(callback.data.split(":", 1)[1]))
-        if order.draft.user_id != callback.from_user.id:
-            raise OrderError("Этот заказ принадлежит другому пользователю.")
+        order = orders.own_order(callback.from_user.id, callback.data.split(":", 1)[1])
     except (OrderError, ValueError) as error:
         await show(callback, escape(str(error)))
         return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [button("↻ Обновить статус", f"student_order:{order.number}")],
-    ] + order_keyboard().inline_keyboard)
-    await show(callback, order_text(order), keyboard)
+    await show(callback, order_text(order), student_order_keyboard(order))
 
 
 @router.callback_query(F.data.startswith("comment:"))

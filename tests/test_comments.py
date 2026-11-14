@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
-from app.schedule import LOCAL_TIMEZONE
+from app.schedule import test_break as make_test_break, LOCAL_TIMEZONE
 from app.services.orders import MAX_COMMENT_LENGTH, OrderError, OrderService
 
 
@@ -14,7 +14,7 @@ class CommentTests(unittest.TestCase):
         self.service = OrderService()
         self.service.begin(1)
         self.now = datetime(2026, 11, 13, 9, 20, tzinfo=LOCAL_TIMEZONE)
-        self.draft = self.service.prepare(1, '1', '1_350', 'test', self.now)
+        self.draft = self.service.prepare(1, '1', '1_350', make_test_break(self.now).id, self.now)
 
     def test_comment_saved_with_order_without_changing_price(self):
         self.service.start_comment(1, self.draft.token, self.now)

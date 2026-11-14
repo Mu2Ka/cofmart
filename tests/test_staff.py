@@ -9,7 +9,7 @@ from aiogram.types import Chat, Message
 
 from app.handlers import entry, staff, student
 from app.notifications import notify_staff, notify_student
-from app.schedule import LOCAL_TIMEZONE
+from app.schedule import test_break as make_test_break, LOCAL_TIMEZONE
 from app.services.cafes import CafeError, cafes
 from app.services.orders import OrderError, OrderService
 from app.services.roles import AccessError, roles
@@ -35,7 +35,7 @@ class StaffSetup:
     def create_order(self, user_id=1, cafe_id='1'):
         sku = '1_350' if cafe_id == '1' else '1_portion'
         self.orders.begin(user_id)
-        draft = self.orders.prepare(user_id, cafe_id, sku, 'test', self.now)
+        draft = self.orders.prepare(user_id, cafe_id, sku, make_test_break(self.now).id, self.now)
         self.orders.start_comment(user_id, draft.token, self.now)
         draft = self.orders.save_comment(user_id, draft.token, 'со льдом', self.now)
         return self.orders.confirm(user_id, draft.token, self.now)
@@ -44,6 +44,11 @@ class StaffSetup:
 class StaffServiceTests(StaffSetup, unittest.TestCase):
     def setUp(self):
         self.setup_staff()
+
+    def test_bot_id_in_role_settings_is_reported(self):
+        self.assertEqual(roles.configuration_warnings(999), [])
+        self.assertTrue(roles.configuration_warnings(900))
+        self.assertTrue(roles.configuration_warnings(101))
 
     def test_roles_grant_revoke_and_no_self_promotion(self):
         self.assertEqual(roles.cafes_for(101), {'1'})
@@ -93,7 +98,7 @@ class StaffServiceTests(StaffSetup, unittest.TestCase):
 
     def test_pause_and_stoplist_rechecked_at_confirmation(self):
         self.orders.begin(1)
-        draft = self.orders.prepare(1, '1', '1_350', 'test', self.now)
+        draft = self.orders.prepare(1, '1', '1_350', make_test_break(self.now).id, self.now)
         cafes.set_open(101, '1', False)
         with self.assertRaises(OrderError):
             self.orders.confirm(1, draft.token, self.now)
@@ -143,28 +148,28 @@ class StaffFlowTests(StaffSetup, unittest.IsolatedAsyncioTestCase):
 
     async def test_barista_status_notification_and_forged_button(self):
         order = self.create_order()
-        await staff.staff_callback(self.callback(201, f'staff_order:{order.number}'))
+        await staff.staff_callback(self.callback(201, f'staff_order:{order.reference}'))
         self.assertIn('нет доступа', self.edit.call_args.args[0])
-        await staff.staff_callback(self.callback(101, f'staff_order:{order.number}'))
+        await staff.staff_callback(self.callback(101, f'staff_order:{order.reference}'))
         self.assertIn('со льдом', self.edit.call_args.args[0])
-        await staff.staff_callback(self.callback(101, f'staff_status:{order.number}:preparing:0'))
-        await staff.staff_callback(self.callback(101, f'staff_status:{order.number}:ready:1'))
+        await staff.staff_callback(self.callback(101, f'staff_status:{order.reference}:preparing:0'))
+        await staff.staff_callback(self.callback(101, f'staff_status:{order.reference}:ready:1'))
         self.assertEqual(self.bot.send_message.await_count, 2)
         self.assertEqual(self.bot.send_message.call_args.args[0], 1)
         self.assertIn('Можно забирать', self.bot.send_message.call_args.args[1])
-        await staff.staff_callback(self.callback(101, f'staff_status:{order.number}:ready:1'))
+        await staff.staff_callback(self.callback(101, f'staff_status:{order.reference}:ready:1'))
         self.assertEqual(self.bot.send_message.await_count, 2)
 
     async def test_student_order_privacy(self):
         order = self.create_order()
-        await student.student_order(self.callback(2, f'student_order:{order.number}'))
+        await student.student_order(self.callback(2, f'student_order:{order.reference}'))
         self.assertNotIn('со льдом', self.edit.call_args.args[0])
-        await student.student_order(self.callback(1, f'student_order:{order.number}'))
+        await student.student_order(self.callback(1, f'student_order:{order.reference}'))
         self.assertIn('со льдом', self.edit.call_args.args[0])
 
     async def test_new_order_notifies_only_assigned_staff_and_only_once(self):
         self.orders.begin(1)
-        draft = self.orders.prepare(1, '1', '1_350', 'test', self.now)
+        draft = self.orders.prepare(1, '1', '1_350', make_test_break(self.now).id, self.now)
         with patch('app.handlers.student.local_now', lambda: self.now):
             await student.confirm_callback(self.callback(1, f'confirm:{draft.token}'))
             await student.confirm_callback(self.callback(1, f'confirm:{draft.token}'))

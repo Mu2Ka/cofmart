@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from app.catalog import PRODUCTS, get_drink
-from app.schedule import LOCAL_TIMEZONE, available_breaks, daily_breaks, find_break
+from app.schedule import test_break as make_test_break, LOCAL_TIMEZONE, available_breaks, daily_breaks, find_break
 from app.services.orders import OrderError, OrderService
 
 
@@ -32,13 +32,13 @@ class CatalogTests(unittest.TestCase):
 
 
 class TestModeTests(unittest.TestCase):
-    def test_order_at_night_and_confirmation_after_midnight(self):
+    def test_order_at_night_and_confirmation_within_reservation(self):
         now = datetime(2026, 11, 13, 23, 55, tzinfo=LOCAL_TIMEZONE)
         with patch('app.settings.FOLLOW_SCHEDULE', False):
-            self.assertEqual(available_breaks(now)[0].id, 'test')
+            self.assertEqual(available_breaks(now)[0].id, make_test_break(now).id)
             service = OrderService()
-            draft = service.prepare(1, '1', '4_350a', 'test', now)
-            order = service.confirm(1, draft.token, now + timedelta(minutes=10))
+            draft = service.prepare(1, '1', '4_350a', make_test_break(now).id, now)
+            order = service.confirm(1, draft.token, now + timedelta(seconds=60))
             self.assertEqual(order.draft.price, 330)
             self.assertIn('альтернативное молоко', order.draft.drink_name)
 
@@ -46,9 +46,9 @@ class TestModeTests(unittest.TestCase):
         now = datetime(2026, 11, 13, 9, 10, tzinfo=LOCAL_TIMEZONE)
         service = OrderService()
         with patch('app.settings.FOLLOW_SCHEDULE', False):
-            draft = service.prepare(1, '1', '4_350', 'test', now)
+            draft = service.prepare(1, '1', '4_350', make_test_break(now).id, now)
         with patch('app.settings.FOLLOW_SCHEDULE', True):
-            self.assertIsNone(find_break('test', now))
+            self.assertIsNone(find_break(make_test_break(now).id, now))
             with self.assertRaises(OrderError):
                 service.confirm(1, draft.token, now)
 

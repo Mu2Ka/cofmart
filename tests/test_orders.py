@@ -57,7 +57,7 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(len(self.service.confirmed), 0)
 
     def test_repeated_confirmation_is_same_order(self):
-        draft = self.prepare()
+        draft = self.service.prepare(1, '1', '4_350', self.break_id, at(9, 39))
         first = self.service.confirm(1, draft.token, at(9, 39, 59))
         second = self.service.confirm(1, draft.token, at(9, 40))
         self.assertEqual(first, second)
@@ -66,7 +66,7 @@ class OrderTests(unittest.TestCase):
     def test_other_user_cannot_confirm(self):
         draft = self.prepare()
         with self.assertRaises(OrderError):
-            self.service.confirm(2, draft.token, at(9, 25))
+            self.service.confirm(2, draft.token, at(9, 21))
 
     def test_yesterday_button_and_cancelled_draft(self):
         yesterday = daily_breaks(at(9).date() - timedelta(days=1))[0].id
@@ -75,18 +75,18 @@ class OrderTests(unittest.TestCase):
         draft = self.prepare()
         self.service.cancel(1)
         with self.assertRaises(OrderError):
-            self.service.confirm(1, draft.token, at(9, 25))
+            self.service.confirm(1, draft.token, at(9, 21))
 
     def test_new_selection_invalidates_old_confirmation(self):
         old = self.prepare()
         self.prepare()
         with self.assertRaises(OrderError):
-            self.service.confirm(1, old.token, at(9, 25))
+            self.service.confirm(1, old.token, at(9, 21))
 
     def test_old_draft_is_invalid_next_day(self):
         draft = self.prepare()
         with self.assertRaises(OrderError):
-            self.service.confirm(1, draft.token, at(9, 25) + timedelta(days=1))
+            self.service.confirm(1, draft.token, at(9, 21) + timedelta(days=1))
 
     def test_unknown_product_rejected(self):
         with self.assertRaises(OrderError):
@@ -105,7 +105,7 @@ class OrderTests(unittest.TestCase):
     def test_order_keeps_name_and_price_snapshot(self):
         from app.catalog import PRODUCTS
         draft = self.prepare()
-        order = self.service.confirm(1, draft.token, at(9, 25))
+        order = self.service.confirm(1, draft.token, at(9, 21))
         # Уже принятый заказ должен отображаться даже после удаления позиции из меню.
         with patch.dict(PRODUCTS['1'], {}, clear=True):
             repeated = self.service.confirm(1, draft.token, at(9, 30))

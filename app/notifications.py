@@ -6,14 +6,19 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.services.orders import Order
 from app.services.roles import roles
+from app.services.bans import bans
 from app.ui import order_text
+from app.customer_keyboards import student_order_keyboard
 
 logger = logging.getLogger(__name__)
 
 
-async def send(bot: Bot, user_id: int, text: str, callback_data: str, label: str):
+async def send(bot: Bot, user_id: int, text: str, callback_data: str, label: str,
+               keyboard: InlineKeyboardMarkup | None = None):
+    if bans.is_blocked(user_id):
+        return
     try:
-        await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(
+        await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard or InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=callback_data)]]
         ))
     except TelegramAPIError:
@@ -24,10 +29,13 @@ async def send(bot: Bot, user_id: int, text: str, callback_data: str, label: str
 async def notify_staff(bot: Bot, order: Order):
     for user_id in roles.staff_for(order.draft.cafe_id):
         await send(bot, user_id, "<b>🔔 Новый заказ</b>\n\n" + order_text(order),
-                   f"staff_order:{order.number}", "Открыть заказ")
+                   f"staff_order:{order.reference}", "Открыть заказ")
 
 
 async def notify_student(bot: Bot, order: Order):
     hint = "\n\nМожно забирать напиток!" if order.status == "ready" else ""
+    if order.status == "done":
+        hint = "\n\nОцените заказ от 1 до 5 ⭐"
     await send(bot, order.draft.user_id, order_text(order) + hint,
-               f"student_order:{order.number}", "Мой заказ")
+               f"student_order:{order.reference}", "Мой заказ",
+               student_order_keyboard(order) if order.status == "done" else None)

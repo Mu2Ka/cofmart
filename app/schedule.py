@@ -27,18 +27,22 @@ class Break:
     ends_at: datetime
 
     @property
+    def is_test(self) -> bool:
+        return self.id.endswith("-test")
+
+    @property
     def closes_at(self) -> datetime:
         return self.starts_at - timedelta(minutes=CUTOFF_MINUTES)
 
     def accepts_orders(self, now: datetime) -> bool:
-        if self.id == "test":
-            return not settings.FOLLOW_SCHEDULE
+        if self.is_test:
+            return not settings.FOLLOW_SCHEDULE and self.opens_at <= now < self.ends_at
         return self.opens_at <= now < self.closes_at
 
     @property
     def label(self) -> str:
-        if self.id == "test":
-            return "Тестовая выдача · без расписания"
+        if self.is_test:
+            return f"Тестовая перемена {self.starts_at:%d.%m} · без расписания"
         return f"{self.title}: {self.starts_at:%H:%M}–{self.ends_at:%H:%M}"
 
 
@@ -75,7 +79,22 @@ def find_break(break_id: str, now: datetime) -> Break | None:
 
 
 def test_break(now: datetime) -> Break:
-    return Break("test", "Тестовая выдача", now, now, now)
+    day = now.astimezone(LOCAL_TIMEZONE).date()
+    start = datetime.combine(day, time(), LOCAL_TIMEZONE)
+    return Break(f"{day:%Y%m%d}-test", "Тестовая перемена", start, start, start + timedelta(days=1))
+
+
+def configurable_breaks(now: datetime) -> list[Break]:
+    """Бариста может настроить ещё не закрытые окна сегодня и завтра."""
+    if not settings.FOLLOW_SCHEDULE:
+        return [test_break(now)]
+    day = now.astimezone(LOCAL_TIMEZONE).date()
+    return [item for date_ in (day, day + timedelta(days=1))
+            for item in daily_breaks(date_) if now < item.closes_at]
+
+
+def find_configurable_break(break_id: str, now: datetime) -> Break | None:
+    return next((item for item in configurable_breaks(now) if item.id == break_id), None)
 
 
 def closed_message(now: datetime) -> str:

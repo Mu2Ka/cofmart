@@ -23,7 +23,13 @@ async def entry(message: Message):
 
 @router.message(Command("myid"))
 async def my_id(message: Message):
-    await message.answer(f"Ваш Telegram ID: {message.from_user.id}")
+    user_id = message.from_user.id
+    available = ["студент"]
+    if roles.cafes_for(user_id):
+        available.append("бариста")
+    if roles.is_admin(user_id):
+        available.append("администратор")
+    await message.answer(f"Ваш Telegram ID: {user_id}\nДоступные роли: {', '.join(available)}")
 
 
 @router.message(Command("barista"))

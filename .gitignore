@@ -2,3 +2,6 @@
 .venv/
 __pycache__/
 *.pyc
+data/blocked_users.json
+data/blocked_users.tmp
+app/local_settings.py
