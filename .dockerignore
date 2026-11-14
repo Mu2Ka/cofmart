@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+.venv
+.idea
+.qa
+**/__pycache__
+**/node_modules
+**/dist
+tests

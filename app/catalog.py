@@ -1,5 +1,4 @@
-
-
+"""Legacy catalogue, used only by the initial data import (app.db.seed)."""
 CAFES = {"1": "CaVa", "2": "Порт-Брю"}
 
 MENU = {
