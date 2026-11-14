@@ -31,6 +31,10 @@ class Break:
         return self.id.endswith("-test")
 
     @property
+    def is_live(self) -> bool:
+        return self.id.endswith("-live")
+
+    @property
     def closes_at(self) -> datetime:
         return self.starts_at - timedelta(minutes=CUTOFF_MINUTES)
 
@@ -43,6 +47,8 @@ class Break:
     def label(self) -> str:
         if self.is_test:
             return f"Тестовая перемена {self.starts_at:%d.%m} · без расписания"
+        if self.is_live:
+            return f"Выдача по готовности · приём до {self.closes_at:%d.%m %H:%M}"
         return f"{self.title}: {self.starts_at:%H:%M}–{self.ends_at:%H:%M}"
 
 
@@ -66,15 +72,31 @@ def daily_breaks(day: date) -> list[Break]:
     return result
 
 
+def order_windows(day: date) -> list[Break]:
+    """Приём между короткими перерывами; вечером продолжается до следующего утра.
+
+    Идентификатор окна определяет общую квоту. Длинные перемены не прерывают приём.
+    """
+    short_breaks = [item for item in daily_breaks(day) if item.id.endswith("s")]
+    previous_end = daily_breaks(day - timedelta(days=1))[-1].ends_at
+    result = []
+    for pickup in short_breaks:
+        result.append(Break(pickup.id + "-live", "Текущий приём", previous_end,
+                            pickup.starts_at, pickup.ends_at))
+        previous_end = pickup.ends_at
+    return result
+
+
 def available_breaks(now: datetime) -> list[Break]:
     if not settings.FOLLOW_SCHEDULE:
         return [test_break(now)]
-    return [item for item in daily_breaks(now.astimezone(LOCAL_TIMEZONE).date())
+    day = now.astimezone(LOCAL_TIMEZONE).date()
+    return [item for day_ in (day, day + timedelta(days=1)) for item in order_windows(day_)
             if item.accepts_orders(now)]
 
 
 def find_break(break_id: str, now: datetime) -> Break | None:
-    """Возвращает перерыв только тогда, когда на него сейчас можно заказать."""
+    """Возвращает период приёма только тогда, когда сейчас можно заказать."""
     return next((item for item in available_breaks(now) if item.id == break_id), None)
 
 
@@ -85,12 +107,12 @@ def test_break(now: datetime) -> Break:
 
 
 def configurable_breaks(now: datetime) -> list[Break]:
-    """Бариста может настроить ещё не закрытые окна сегодня и завтра."""
+    """Бариста может настроить текущее и следующие окна сегодня и завтра."""
     if not settings.FOLLOW_SCHEDULE:
         return [test_break(now)]
     day = now.astimezone(LOCAL_TIMEZONE).date()
     return [item for date_ in (day, day + timedelta(days=1))
-            for item in daily_breaks(date_) if now < item.closes_at]
+            for item in order_windows(date_) if now < item.closes_at]
 
 
 def find_configurable_break(break_id: str, now: datetime) -> Break | None:
@@ -99,11 +121,13 @@ def find_configurable_break(break_id: str, now: datetime) -> Break | None:
 
 def closed_message(now: datetime) -> str:
     day = now.astimezone(LOCAL_TIMEZONE).date()
-    next_break = next((item for item in daily_breaks(day) if item.opens_at > now), None)
-    if next_break is None:
-        next_break = daily_breaks(day + timedelta(days=1))[0]
-    return (
-        "Сейчас приём заказов закрыт. "
-        f"Следующее окно откроется {next_break.opens_at:%d.%m в %H:%M}.\n"
-        "Заказы закрываются за 5 минут до начала перерыва. Время Новосибирска."
-    )
+    pause = next((item for item in daily_breaks(day) if item.id.endswith("s")
+                  and item.closes_at <= now < item.ends_at), None)
+    if settings.FOLLOW_SCHEDULE and pause is not None:
+        return (
+            "Приём новых заказов временно приостановлен. "
+            f"Возобновим {pause.ends_at:%d.%m в %H:%M} (Новосибирск).\n"
+            "Пауза начинается за 5 минут до короткого перерыва и заканчивается вместе с ним.\n"
+            "История заказов и рабочая панель доступны."
+        )
+    return "Приём по времени открыт. Доступность зависит от кофейни и свободных слотов."

@@ -1,9 +1,12 @@
 """Настройки бота"""
 
-# False — тестовые заказы в любое время; True — окна по расписанию пар.
-FOLLOW_SCHEDULE = False
+# True — пауза за 5 минут до короткого перерыва и до его конца; False — тест без пауз.
+FOLLOW_SCHEDULE = True
 DEFAULT_SLOTS_PER_BREAK = 10
 SLOT_RESERVATION_SECONDS = 120
+# 0 отключает автоматическое удаление сообщений соответствующего типа.
+SERVICE_MESSAGE_TTL_SECONDS = 60
+NOTIFICATION_TTL_SECONDS = 300
 
 # Username указываются без @. Сравнение нечувствительно к регистру.
 BLOCKED_USERNAMES: set[str] = set()

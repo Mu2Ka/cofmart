@@ -16,7 +16,10 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         self.dispatcher = MagicMock()
         self.dispatcher.start_polling = AsyncMock()
         self.factory = MagicMock(return_value=self.bot)
+        self.cleanup = MagicMock(return_value=AsyncMock())
         for target, value in [
+            ('main.prepare_database', AsyncMock()), ('main.close_database', AsyncMock()),
+            ('main.message_cleanup_worker', self.cleanup),
             ('main.Bot', self.factory), ('main.Dispatcher', MagicMock(return_value=self.dispatcher)),
             ('main.get_bot_token', lambda: 'local-test-token'),
             ('app.settings.FOLLOW_SCHEDULE', False), ('app.settings.ADMIN_IDS', set()),
@@ -52,3 +55,10 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         with patch('app.settings.ADMIN_IDS', {'123'}), self.assertRaises(ValueError):
             await main.main()
         self.factory.assert_not_called()
+
+    async def test_database_failure_stops_startup_before_telegram(self):
+        with patch('main.prepare_database', AsyncMock(side_effect=RuntimeError('schema is outdated'))):
+            with self.assertRaisesRegex(RuntimeError, 'schema is outdated'):
+                await main.main()
+        self.factory.assert_not_called()
+        main.close_database.assert_awaited_once()

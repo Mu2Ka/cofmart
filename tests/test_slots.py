@@ -7,7 +7,7 @@ from aiogram.types import User
 
 from app import settings
 from app.handlers import staff, student
-from app.schedule import daily_breaks, test_break as make_test_break
+from app.schedule import order_windows, available_breaks, test_break as make_test_break
 from app.services.orders import OrderError, OrderService
 from app.services.roles import AccessError, roles
 from app.staff_keyboards import slot_breaks_keyboard, slot_limit_keyboard
@@ -93,11 +93,37 @@ class SlotServiceTests(fixtures.StaffSetup, unittest.TestCase):
         for status in ['preparing', 'ready', 'done']:
             first = self.orders.transition(101, first.number, status, first.revision, self.now)
         self.assertEqual(self.slots().free, 0)
+        self.assertEqual((self.slots().completed, self.slots().active), (1, 1))
         self.orders.transition(101, second.number, 'cancelled', 0, self.now)
         self.assertEqual(self.slots().free, 1)
         with self.assertRaises(OrderError):
             self.orders.transition(101, second.number, 'cancelled', 0, self.now)
         self.assertEqual(self.slots().free, 1)
+
+    def test_only_staff_can_add_slots_and_repeated_button_is_stale(self):
+        self.set_limit(1)
+        order = self.create_order()
+        for status in ('preparing', 'ready', 'done'):
+            order = self.orders.transition(101, order.number, status, order.revision, self.now)
+        summary = self.slots()
+        self.assertEqual((summary.free, summary.completed), (0, 1))
+        for uid in (1, 201):
+            with self.assertRaises(AccessError):
+                self.orders.add_slots(uid, '1', self.pickup.id, 5, self.now, summary.revision)
+        added = self.orders.add_slots(101, '1', self.pickup.id, 5, self.now, summary.revision)
+        self.assertEqual((added.limit, added.free, added.completed), (6, 5, 1))
+        with self.assertRaises(OrderError):
+            self.orders.add_slots(101, '1', self.pickup.id, 5, self.now, summary.revision)
+        self.assertEqual(self.slots().limit, 6)
+
+    def test_add_slots_rejects_invalid_values_and_limit_overflow(self):
+        revision = self.slots().revision
+        for count in (0, -1, True, 1.5, '5', 1000):
+            with self.assertRaises(OrderError):
+                self.orders.add_slots(101, '1', self.pickup.id, count, self.now, revision)
+        self.set_limit(999)
+        with self.assertRaises(OrderError):
+            self.orders.add_slots(101, '1', self.pickup.id, 1, self.now, self.slots().revision)
 
     def test_limit_cannot_be_lower_than_confirmed_plus_reservations(self):
         self.create_order()
@@ -132,7 +158,7 @@ class SlotServiceTests(fixtures.StaffSetup, unittest.TestCase):
     def test_schedule_cutoff_caps_reservation(self):
         now = self.now.replace(hour=9, minute=39, second=59)
         with patch('app.settings.FOLLOW_SCHEDULE', True):
-            pickup = daily_breaks(now.date())[0]
+            pickup = available_breaks(now)[0]
             draft = self.orders.prepare(1, '1', '1_350', pickup.id, now)
             self.assertEqual(draft.reserved_until, pickup.closes_at)
             with self.assertRaises(OrderError):
@@ -140,7 +166,7 @@ class SlotServiceTests(fixtures.StaffSetup, unittest.TestCase):
 
     def test_configure_future_break_and_independent_quotas(self):
         with patch('app.settings.FOLLOW_SCHEDULE', True):
-            first, second = daily_breaks(self.now.date())[:2]
+            first, second = order_windows(self.now.date())[:2]
             self.orders.set_slot_limit(101, '1', first.id, 1, self.now)
             self.orders.set_slot_limit(101, '1', second.id, 2, self.now)
             self.assertEqual(self.orders.slots('1', first.id, self.now).limit, 1)
@@ -149,6 +175,19 @@ class SlotServiceTests(fixtures.StaffSetup, unittest.TestCase):
                 self.orders.prepare(1, '1', '1_350', second.id, self.now)
             with self.assertRaises(OrderError):
                 self.orders.set_slot_limit(101, '1', first.id, 1, first.closes_at)
+
+    def test_live_quota_continues_through_long_break_and_changes_after_short_pause(self):
+        with patch('app.settings.FOLLOW_SCHEDULE', True):
+            first = available_breaks(self.now)[0]
+            draft = self.orders.prepare(1, '1', '1_350', first.id, self.now)
+            self.orders.confirm(1, draft.token, self.now)
+            self.assertEqual(self.orders.slots('1', first.id, self.now).free, 9)
+            after_pause = self.now.replace(hour=9, minute=50)
+            second = available_breaks(after_pause)[0]
+            self.assertNotEqual(first.id, second.id)
+            self.assertEqual(self.orders.slots('1', second.id, after_pause).free, 10)
+            during_long_break = self.now.replace(hour=10, minute=35)
+            self.assertEqual(available_breaks(during_long_break)[0].id, second.id)
 
     def test_test_mode_capacity_and_reservation_reset_at_midnight(self):
         now = self.now.replace(hour=23, minute=59, second=59)
@@ -175,6 +214,39 @@ class SlotServiceTests(fixtures.StaffSetup, unittest.TestCase):
 class SlotFlowTests(fixtures.StaffSetup, unittest.IsolatedAsyncioTestCase):
     setUp = fixtures.StaffFlowTests.setUp
     callback = fixtures.StaffFlowTests.callback
+
+    async def test_menu_history_and_barista_work_during_order_pause(self):
+        source = self.create_order()
+        paused = self.now.replace(hour=9, minute=40)
+        with patch('app.settings.FOLLOW_SCHEDULE', True), \
+                patch('app.handlers.student.local_now', lambda: paused), \
+                patch('app.handlers.staff.local_now', lambda: paused):
+            await student.show_cafes(self.message, 1)
+            self.assertIn('09:50', self.send.call_args.args[0])
+            session = self.orders.session(1)
+            await student.menu_callback(self.callback(1, f'cafe:1:{session}'))
+            self.assertIn('Меню доступно для просмотра', self.edit.call_args.args[0])
+            await student.menu_callback(self.callback(1, f'size:1:1_350:{session}'))
+            self.assertIn('приостановлен', self.edit.call_args.args[0])
+            self.assertNotIn(1, self.orders.drafts)
+            await student.show_my_orders(self.callback(1, 'my_orders'), 1)
+            self.assertIn(f'Заказ №{source.number}', self.edit.call_args.args[0])
+            await staff.staff_callback(self.callback(101, f'staff_status:{source.reference}:preparing:0'))
+            self.assertEqual(self.orders.get_order(source.number).status, 'preparing')
+
+    async def test_add_slots_button_updates_quota_and_student_cannot_use_it(self):
+        pickup = make_test_break(self.now)
+        summary = self.orders.slots('1', pickup.id, self.now)
+        keyboard = slot_limit_keyboard('1', pickup, summary)
+        data = next(button.callback_data for row in keyboard.inline_keyboard for button in row
+                    if button.text.startswith('+5'))
+        await staff.staff_callback(self.callback(1, data))
+        self.assertEqual(self.orders.slots('1', pickup.id, self.now).limit, 10)
+        await staff.staff_callback(self.callback(101, data))
+        self.assertEqual(self.orders.slots('1', pickup.id, self.now).limit, 15)
+        self.assertIn('Выдано (квота потрачена)', self.edit.call_args.args[0])
+        await staff.staff_callback(self.callback(101, data))
+        self.assertEqual(self.orders.slots('1', pickup.id, self.now).limit, 15)
 
     async def test_barista_types_limit_and_student_sees_free_slots(self):
         pickup = make_test_break(self.now)

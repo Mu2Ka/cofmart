@@ -5,22 +5,34 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from app.keyboards import order_keyboard
 from app.services.orders import Order, STATUSES
+from app import settings
+from app.message_cleanup import expire_message, keep_message
 
 
-async def show(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup | None = None):
+async def show(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup | None = None,
+               *, temporary: bool = False):
     if not isinstance(callback.message, Message):
         return
+    # Если worker уже удаляет карточку, дождёмся его и восстановим экран новым сообщением.
+    await keep_message(callback.message)
+    result = callback.message
     try:
         await callback.message.edit_text(text, reply_markup=keyboard or order_keyboard(), parse_mode="HTML")
     except TelegramBadRequest as error:
         reason = str(error).lower()
         if "message is not modified" in reason:
-            return
-        if "message to edit not found" in reason or "message can't be edited" in reason:
+            pass
+        elif "message to edit not found" in reason or "message can't be edited" in reason:
             # Карточку могли удалить или она стала слишком старой для редактирования.
-            await callback.message.answer(text, reply_markup=keyboard or order_keyboard(), parse_mode="HTML")
-            return
-        raise
+            result = await callback.message.answer(text, reply_markup=keyboard or order_keyboard(), parse_mode="HTML")
+        else:
+            raise
+    if temporary:
+        await expire_message(result, settings.SERVICE_MESSAGE_TTL_SECONDS)
+
+
+async def show_notice(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup | None = None):
+    await show(callback, text, keyboard, temporary=True)
 
 
 def order_text(order: Order, staff: bool = False) -> str:

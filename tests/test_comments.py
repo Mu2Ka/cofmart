@@ -57,7 +57,7 @@ class CommentTests(unittest.TestCase):
 
     def test_comment_does_not_bypass_deadline(self):
         with patch('app.settings.FOLLOW_SCHEDULE', True):
-            draft = self.service.prepare(1, '1', '1_350', '20261113-1s', self.now)
+            draft = self.service.prepare(1, '1', '1_350', '20261113-1s-live', self.now)
             self.service.start_comment(1, draft.token, self.now)
             cutoff = self.now.replace(hour=9, minute=40)
             with self.assertRaises(OrderError):

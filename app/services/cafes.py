@@ -7,7 +7,8 @@ class CafeError(ValueError):
 
 
 class CafeService:
-    def __init__(self):
+    def __init__(self, role_service=roles):
+        self.roles = role_service
         self.paused: set[str] = set()
         self.stoplist: set[tuple[str, str]] = set()
 
@@ -24,14 +25,14 @@ class CafeService:
             raise CafeError("Напиток закончился. Выберите другой напиток.")
 
     def set_open(self, actor_id: int, cafe_id: str, enabled: bool):
-        roles.require_cafe(actor_id, cafe_id)
+        self.roles.require_cafe(actor_id, cafe_id)
         if enabled:
             self.paused.discard(cafe_id)
         else:
             self.paused.add(cafe_id)
 
     def set_available(self, actor_id: int, cafe_id: str, product_id: str, enabled: bool):
-        roles.require_cafe(actor_id, cafe_id)
+        self.roles.require_cafe(actor_id, cafe_id)
         if product_id not in PRODUCTS.get(cafe_id, {}):
             raise CafeError("Позиция меню не найдена.")
         key = (cafe_id, product_id)

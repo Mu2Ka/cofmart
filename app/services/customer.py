@@ -1,4 +1,4 @@
-"""Избранные варианты напитков. Данные пока хранятся в памяти процесса."""
+"""Правила избранного и повтора заказов; хранение подключается отдельно."""
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -63,7 +63,7 @@ class CustomerService:
     def get(self, user_id: int, key: str) -> Favorite:
         favorite = self.favorites.get(user_id, {}).get(key)
         if favorite is None:
-            raise CustomerError("Избранный напиток не найден. Возможно, он удалён или бот перезапущен.")
+            raise CustomerError("Избранный напиток не найден. Возможно, он удалён.")
         return favorite
 
     def remove(self, user_id: int, key: str):
@@ -79,10 +79,11 @@ class CustomerService:
             return Selection(favorite.cafe_id, favorite.drink_id)
         raise CustomerError("Неизвестный способ повторения заказа.")
 
-    def prepare(self, user_id: int, kind: str, key: str, break_id: str, now: datetime) -> Draft:
+    def prepare(self, user_id: int, kind: str, key: str, break_id: str, now: datetime,
+                session: str | None = None) -> Draft:
         selection = self.selection(user_id, kind, key)
         return self.orders.prepare(user_id, selection.cafe_id, selection.drink_id,
-                                   break_id, now, comment=selection.comment)
+                                   break_id, now, comment=selection.comment, session=session)
 
 
 customer = CustomerService(orders)

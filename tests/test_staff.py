@@ -1,4 +1,6 @@
 import unittest
+import asyncio
+from tests.memory_store import AsyncService, MemoryStore
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -31,6 +33,10 @@ class StaffSetup:
             mocked.start()
             self.addCleanup(mocked.stop)
         self.orders = OrderService()
+        memory = MemoryStore(self.orders)
+        mocked = patch('app.services.persistent.get_store', lambda: memory)
+        mocked.start()
+        self.addCleanup(mocked.stop)
 
     def create_order(self, user_id=1, cafe_id='1'):
         sku = '1_350' if cafe_id == '1' else '1_portion'
@@ -114,9 +120,9 @@ class StaffServiceTests(StaffSetup, unittest.TestCase):
             cafes.set_available(101, '1', '999', False)
 
     def test_role_buttons_and_revoked_permission(self):
-        student_buttons = str(roles_keyboard(1))
+        student_buttons = str(asyncio.run(roles_keyboard(1)))
         self.assertNotIn('role:barista', student_buttons)
-        self.assertNotIn('role:admin', str(roles_keyboard(101)))
+        self.assertNotIn('role:admin', str(asyncio.run(roles_keyboard(101))))
         order = self.create_order()
         roles.assign(900, 101, '1', False)
         with self.assertRaises(AccessError):
@@ -129,9 +135,9 @@ class StaffFlowTests(StaffSetup, unittest.IsolatedAsyncioTestCase):
         self.edit = AsyncMock()
         self.send = AsyncMock()
         for target, value in [
-            ('app.handlers.staff.orders', self.orders),
-            ('app.handlers.student.orders', self.orders),
-            ('app.handlers.entry.orders', self.orders),
+            ('app.handlers.staff.orders', AsyncService(self.orders)),
+            ('app.handlers.student.orders', AsyncService(self.orders)),
+            ('app.handlers.entry.orders', AsyncService(self.orders)),
             ('app.handlers.staff.local_now', lambda: self.now),
             ('aiogram.types.Message.edit_text', self.edit),
             ('aiogram.types.Message.answer', self.send),

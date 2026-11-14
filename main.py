@@ -12,21 +12,46 @@ from app.handlers.staff import router as staff_router
 from app.handlers.customer import router as customer_router
 from app.services.roles import roles
 from app.services.bans import bans
-from app.middlewares import install_ban_middleware
+from app.middlewares import install_ban_middleware, install_database_middleware
+from app.services.persistent import orders
+from app.message_cleanup import message_cleanup_worker
+
+
+async def prepare_database():
+    from app.db.check import check_database
+    from app.db.connection import session_factory
+    from app.db.seed import seed_cafes
+    await check_database()
+    async with session_factory.begin() as session:
+        await seed_cafes(session)
+
+
+async def close_database():
+    from app.db.connection import engine
+    await engine.dispose()
 
 
 async def main():
     roles.validate_configuration()
     bans.validate_configuration()
+    try:
+        await run_bot()
+    finally:
+        await close_database()
+
+
+async def run_bot():
+    await prepare_database()
     dp = Dispatcher()
-    install_ban_middleware(dp)
+    install_ban_middleware(dp, cancel_order=orders.cancel)
+    install_database_middleware(dp)
     # Рабочие карточки и пожелания к заказам показываем только в личном чате.
     dp.message.filter(F.chat.type == "private")
     dp.callback_query.filter(F.message.chat.type == "private")
     # Общие команды подключены до текстового обработчика комментариев.
     dp.include_routers(entry_router, staff_router, customer_router, student_router)
 
-    async with Bot(token=get_bot_token()) as bot:
+    async with Bot(token=get_bot_token()) as bot, message_cleanup_worker(bot):
         for warning in roles.configuration_warnings(bot.id):
             logging.warning(warning)
         try:

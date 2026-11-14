@@ -12,18 +12,21 @@ from app.handlers import student
 from app.keyboards import cafes_keyboard, categories_keyboard, drinks_keyboard, sizes_keyboard, milk_keyboard
 from app.schedule import LOCAL_TIMEZONE
 from app.services.orders import OrderService
+from tests.memory_store import AsyncService, MemoryStore
 
 
 class BotFlowTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.service = OrderService()
+        memory = MemoryStore(self.service)
         self.session = self.service.begin(1)
         now = datetime(2026, 11, 13, 23, 55, tzinfo=LOCAL_TIMEZONE)
         self.message = Message.model_construct(message_id=1, date=now, chat=Chat(id=1, type='private'))
         self.edit = AsyncMock()
         self.send = AsyncMock()
         for target, value in [
-            ('app.handlers.student.orders', self.service),
+            ('app.services.persistent.get_store', lambda: memory),
+            ('app.handlers.student.orders', AsyncService(self.service)),
             ('app.settings.FOLLOW_SCHEDULE', False),
             ('app.handlers.student.local_now', lambda: now),
             ('aiogram.types.Message.edit_text', self.edit),
@@ -89,12 +92,12 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.click('product:1')
         self.assertIn('устарели', self.edit.call_args.args[0])
 
-    def test_menu_buttons_fit_telegram_callback_limit(self):
-        keyboards = [cafes_keyboard(self.session)]
+    async def test_menu_buttons_fit_telegram_callback_limit(self):
+        keyboards = [await cafes_keyboard(self.session)]
         for cafe_id, products in PRODUCTS.items():
             keyboards.append(categories_keyboard(cafe_id, self.session))
             for product_id, product in products.items():
-                keyboards.append(drinks_keyboard(cafe_id, product.category, self.session))
+                keyboards.append(await drinks_keyboard(cafe_id, product.category, self.session))
                 keyboards.append(sizes_keyboard(cafe_id, product_id, self.session))
                 if product.alternative_milk:
                     for size in product.sizes:

@@ -2,36 +2,39 @@ from aiogram.types import InlineKeyboardMarkup
 
 from app.catalog import CAFES, PRODUCTS
 from app.keyboards import button
-from app.services.cafes import cafes
+from app.services.persistent import cafes
 from app.services.orders import Order, STATUSES, TRANSITIONS
 from app.services.orders import MAX_SLOT_LIMIT, SlotSummary
 from app.schedule import Break
-from app.services.roles import roles
+from app.services.persistent import roles
 
 PAGE_SIZE = 6
 
 
-def roles_keyboard(user_id: int) -> InlineKeyboardMarkup:
+async def roles_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    roles_view = await roles.view()
     rows = [[button("🎓 Студент · заказать кофе", "role:student")]]
-    if roles.cafes_for(user_id):
+    if roles_view.cafes_for(user_id):
         rows.append([button("☕ Бариста · рабочая панель", "role:barista")])
-    if roles.is_admin(user_id):
+    if roles_view.is_admin(user_id):
         rows.append([button("⚙ Администратор", "role:admin")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def staff_home_keyboard(user_id: int) -> InlineKeyboardMarkup:
+async def staff_home_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    roles_view = await roles.view()
     return InlineKeyboardMarkup(inline_keyboard=[
         [button(CAFES[cafe_id], f"staff_cafe:{cafe_id}")]
-        for cafe_id in sorted(roles.cafes_for(user_id))
+        for cafe_id in sorted(roles_view.cafes_for(user_id))
     ] + [[button("← Выбор роли", "roles")]])
 
 
-def cafe_keyboard(cafe_id: str) -> InlineKeyboardMarkup:
-    opened = cafes.is_open(cafe_id)
+async def cafe_keyboard(cafe_id: str) -> InlineKeyboardMarkup:
+    cafes_view = await cafes.view()
+    opened = cafes_view.is_open(cafe_id)
     return InlineKeyboardMarkup(inline_keyboard=[
         [button("📋 Активные заказы", f"staff_queue:{cafe_id}:active:0")],
-        [button("🎟 Слоты на перемены", f"staff_slots:{cafe_id}")],
+        [button("🎟 Слоты приёма", f"staff_slots:{cafe_id}")],
         [button("✅ Выданные", f"staff_queue:{cafe_id}:done:0"),
          button("Отменённые", f"staff_queue:{cafe_id}:cancelled:0")],
         [button("🥤 Наличие напитков", f"staff_menu:{cafe_id}:0")],
@@ -60,9 +63,10 @@ def queue_keyboard(cafe_id: str, status: str, page: int, orders: list[Order]) ->
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def staff_order_keyboard(order: Order, actor_id: int) -> InlineKeyboardMarkup:
+async def staff_order_keyboard(order: Order, actor_id: int) -> InlineKeyboardMarkup:
+    roles_view = await roles.view()
     labels = {"preparing": "☕ Взять в работу", "ready": "✅ Готов", "done": "📦 Выдан", "cancelled": "✕ Отменить заказ"}
-    allowed = order.barista_id in {None, actor_id} or roles.is_admin(actor_id)
+    allowed = order.barista_id in {None, actor_id} or roles_view.is_admin(actor_id)
     rows = [[button(labels[status], f"staff_status:{order.reference}:{status}:{order.revision}")]
             for status in labels if allowed and status in TRANSITIONS[order.status]]
     rows += [[button("↻ Обновить", f"staff_order:{order.reference}")],
@@ -70,10 +74,11 @@ def staff_order_keyboard(order: Order, actor_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def availability_keyboard(cafe_id: str, page: int) -> InlineKeyboardMarkup:
+async def availability_keyboard(cafe_id: str, page: int) -> InlineKeyboardMarkup:
+    cafes_view = await cafes.view()
     products = list(PRODUCTS[cafe_id].items())
-    rows = [[button(f"{'✅' if cafes.is_available(cafe_id, product_id) else '⛔'} {product.name}",
-                    f"staff_item:{cafe_id}:{product_id}:{int(not cafes.is_available(cafe_id, product_id))}:{page}")]
+    rows = [[button(f"{'✅' if cafes_view.is_available(cafe_id, product_id) else '⛔'} {product.name}",
+                    f"staff_item:{cafe_id}:{product_id}:{int(not cafes_view.is_available(cafe_id, product_id))}:{page}")]
             for product_id, product in products[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]]
     navigation = []
     if page:
@@ -88,7 +93,8 @@ def availability_keyboard(cafe_id: str, page: int) -> InlineKeyboardMarkup:
 
 def slot_breaks_keyboard(cafe_id: str, items: list[tuple[Break, SlotSummary]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [button((f"{pickup.starts_at:%d.%m %H:%M}" if not pickup.is_test else f"Тест {pickup.starts_at:%d.%m}")
+        [button((f"Приём до {pickup.closes_at:%d.%m %H:%M}" if pickup.is_live else
+                 f"{pickup.starts_at:%d.%m %H:%M}" if not pickup.is_test else f"Тест {pickup.starts_at:%d.%m}")
                 + f" · {summary.free}/{summary.limit} свободно", f"staff_slot:{cafe_id}:{pickup.id}")]
         for pickup, summary in items
     ] + [[button("↻ Обновить", f"staff_slots:{cafe_id}")],
@@ -99,7 +105,11 @@ def slot_limit_keyboard(cafe_id: str, pickup: Break, summary: SlotSummary) -> In
     values = sorted({0, 5, 10, 15, 20, max(0, summary.limit - 1), min(MAX_SLOT_LIMIT, summary.limit + 1)})
     buttons = [button(str(value), f"staff_setslots:{cafe_id}:{pickup.id}:{value}:{summary.revision}")
                for value in values]
-    return InlineKeyboardMarkup(inline_keyboard=[buttons[index:index + 4] for index in range(0, len(buttons), 4)] + [
+    additions = [button(f"+{count} {'слот' if count == 1 else 'слотов'}",
+                        f"staff_addslots:{cafe_id}:{pickup.id}:{count}:{summary.revision}")
+                 for count in (1, 5) if summary.limit + count <= MAX_SLOT_LIMIT]
+    return InlineKeyboardMarkup(inline_keyboard=([additions] if additions else []) +
+        [buttons[index:index + 4] for index in range(0, len(buttons), 4)] + [
         [button("✎ Ввести число", f"staff_editslots:{cafe_id}:{pickup.id}")],
         [button("↻ Обновить", f"staff_slot:{cafe_id}:{pickup.id}")],
         [button("← Перемены", f"staff_slots:{cafe_id}")],

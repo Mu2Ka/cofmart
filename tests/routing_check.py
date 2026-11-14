@@ -18,6 +18,7 @@ from app.services.bans import BLOCK_MESSAGE, BanService
 from app.schedule import test_break as make_test_break
 from app.services.orders import orders
 from app.services.customer import customer
+from tests.memory_store import MemoryStore
 
 
 async def check():
@@ -35,7 +36,8 @@ async def check():
     with tempfile.TemporaryDirectory() as directory, \
             patch('app.settings.BLOCKED_USERNAMES', {'blocked_sample_one', 'blocked_sample_two'}), \
             patch('app.settings.FOLLOW_SCHEDULE', False), patch('app.settings.ADMIN_IDS', {900}), \
-            patch('app.settings.BARISTA_CAFES', {101: {'1'}}):
+            patch('app.settings.BARISTA_CAFES', {101: {'1'}}), \
+            patch('app.services.persistent.get_store', lambda: MemoryStore(orders, customer)):
         install_ban_middleware(dp, BanService(Path(directory) / 'blocked.json'))
         for index, (user_id, command, expected) in enumerate([
             (1, '/start', 'Выберите'), (1, '/student', 'Выберите кофейню'),

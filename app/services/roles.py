@@ -24,6 +24,10 @@ class RoleService:
             raise ValueError("DEFAULT_SLOTS_PER_BREAK должен быть целым числом от 0 до 999.")
         if type(settings.SLOT_RESERVATION_SECONDS) is not int or settings.SLOT_RESERVATION_SECONDS <= 0:
             raise ValueError("SLOT_RESERVATION_SECONDS должен быть положительным целым числом.")
+        for name in ("SERVICE_MESSAGE_TTL_SECONDS", "NOTIFICATION_TTL_SECONDS"):
+            value = getattr(settings, name)
+            if type(value) is not int or not 0 <= value <= 86400:
+                raise ValueError(f"{name} должен быть целым числом от 0 до 86400 (секунды).")
         if not isinstance(settings.ADMIN_IDS, (set, frozenset)) or any(
             type(user_id) is not int or user_id <= 0 for user_id in settings.ADMIN_IDS
         ):

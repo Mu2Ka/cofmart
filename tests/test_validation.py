@@ -2,6 +2,7 @@
 
 import asyncio
 import unittest
+from tests.memory_store import AsyncService
 from datetime import timezone
 from html.parser import HTMLParser
 from types import SimpleNamespace
@@ -80,6 +81,8 @@ class AuditServiceTests(StaffSetup, unittest.TestCase):
             ('FOLLOW_SCHEDULE', 'False'), ('ADMIN_IDS', {True}), ('ADMIN_IDS', {'900'}),
             ('ADMIN_IDS', {}), ('BARISTA_CAFES', []), ('BARISTA_CAFES', {'101': {'1'}}),
             ('BARISTA_CAFES', {101: {1}}), ('BARISTA_CAFES', {101: {'unknown'}}),
+            ('SERVICE_MESSAGE_TTL_SECONDS', True), ('SERVICE_MESSAGE_TTL_SECONDS', -1),
+            ('NOTIFICATION_TTL_SECONDS', '300'), ('NOTIFICATION_TTL_SECONDS', 86401),
         ]:
             with self.subTest(setting=name, value=value), patch(f'app.settings.{name}', value):
                 with self.assertRaises(ValueError):
@@ -90,12 +93,12 @@ class AuditServiceTests(StaffSetup, unittest.TestCase):
             utc = self.now.astimezone(timezone.utc)
             self.assertEqual(available_breaks(self.now), available_breaks(utc))
             late = self.now.replace(hour=23, minute=59)
-            self.assertIn('14.11 в 09:00', closed_message(late))
+            self.assertIn('Приём по времени открыт', closed_message(late))
 
     def test_staff_callbacks_fit_telegram_limit_with_unique_order_keys(self):
         order = self.create_order()
-        keyboards = [staff_order_keyboard(order, 101), queue_keyboard('1', 'active', 0, [order]),
-                     availability_keyboard('1', 0)]
+        keyboards = [asyncio.run(staff_order_keyboard(order, 101)), queue_keyboard('1', 'active', 0, [order]),
+                     asyncio.run(availability_keyboard('1', 0))]
         for keyboard in keyboards:
             for row in keyboard.inline_keyboard:
                 for button in row:
@@ -123,7 +126,7 @@ class AuditFlowTests(StaffSetup, unittest.IsolatedAsyncioTestCase):
         self.setup_staff()
         self.edit, self.send, self.bot = AsyncMock(), AsyncMock(), AsyncMock()
         for target, value in [
-            ('app.handlers.student.orders', self.orders), ('app.handlers.staff.orders', self.orders),
+            ('app.handlers.student.orders', AsyncService(self.orders)), ('app.handlers.staff.orders', AsyncService(self.orders)),
             ('app.handlers.student.local_now', lambda: self.now),
             ('app.handlers.staff.local_now', lambda: self.now),
             ('aiogram.types.Message.edit_text', self.edit), ('aiogram.types.Message.answer', self.send),
@@ -185,7 +188,7 @@ class AuditFlowTests(StaffSetup, unittest.IsolatedAsyncioTestCase):
         old = self.create_order()
         self.orders = OrderService()
         new = self.create_order(user_id=2)
-        with patch('app.handlers.staff.orders', self.orders):
+        with patch('app.handlers.staff.orders', AsyncService(self.orders)):
             await staff.staff_callback(self.callback(101, f'staff_status:{old.reference}:preparing:0'))
         self.assertEqual(self.orders.get_order(new.number).status, 'new')
         self.bot.send_message.assert_not_awaited()

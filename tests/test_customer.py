@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from tests.memory_store import AsyncService
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -66,7 +67,7 @@ class CustomerServiceTests(fixtures.StaffSetup, unittest.TestCase):
     def test_repeat_uses_new_break_and_rejects_closed_window(self):
         source = self.create_order()
         with patch('app.settings.FOLLOW_SCHEDULE', True):
-            pickup = daily_breaks(self.now.date())[0]
+            pickup = available_breaks(self.now)[0]
             draft = self.customer.prepare(1, 'r', source.reference, pickup.id, self.now)
             self.assertEqual(draft.pickup.id, pickup.id)
             with self.assertRaises(OrderError):
@@ -147,8 +148,8 @@ class CustomerFlowTests(fixtures.StaffSetup, unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.customer = CustomerService(self.orders)
-        for target, value in [('app.handlers.customer.customer', self.customer),
-                              ('app.handlers.customer.orders', self.orders),
+        for target, value in [('app.handlers.customer.customer', AsyncService(self.customer)),
+                              ('app.handlers.customer.orders', AsyncService(self.orders)),
                               ('app.handlers.customer.local_now', lambda: self.now)]:
             mocked = patch(target, value)
             mocked.start()
@@ -173,17 +174,13 @@ class CustomerFlowTests(fixtures.StaffSetup, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.orders.drafts[1].comment, '')
         self.assertEqual(len(self.orders.confirmed), 2)
 
-    async def test_repeat_schedule_keyboard_callback_is_consumed(self):
+    async def test_repeat_immediately_uses_current_live_window(self):
         source = self.create_order()
         with patch('app.settings.FOLLOW_SCHEDULE', True):
             await self.click(1, f'repeat:{source.reference}')
-            self.assertIn('Выберите новую перемену', self.edit.call_args.args[0])
-            keyboard = self.edit.call_args.kwargs['reply_markup']
-            data = keyboard.inline_keyboard[0][0].callback_data
-            self.assertTrue(data.startswith('quick:r:'))
-            await self.click(1, data)
             self.assertIn('Проверьте заказ', self.edit.call_args.args[0])
             self.assertFalse(self.orders.drafts[1].pickup.is_test)
+            self.assertTrue(self.orders.drafts[1].pickup.is_live)
 
     async def test_stale_shortcut_and_foreign_favorite_are_rejected(self):
         source = self.create_order()
@@ -192,7 +189,9 @@ class CustomerFlowTests(fixtures.StaffSetup, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(2, self.orders.drafts)
         with patch('app.settings.FOLLOW_SCHEDULE', True):
             await self.click(1, f'repeat:{source.reference}')
-            data = self.edit.call_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data
+            session = self.orders.session(1)
+            pickup = available_breaks(self.now)[0]
+            data = f'quick:r:{source.reference}:{pickup.id}:{session}'
             self.orders.begin(1)
             await self.click(1, data)
             self.assertIn('устарело', self.edit.call_args.args[0])

@@ -4,24 +4,27 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from app import settings
 from app.catalog import CAFES, get_drink
 from app.customer_keyboards import (
     FAVORITES_PAGE_SIZE, favorite_keyboard, favorites_keyboard,
-    shortcut_breaks_keyboard, student_order_keyboard,
+    student_order_keyboard,
 )
 from app.handlers.student import show_draft
 from app.schedule import available_breaks, closed_message, local_now
-from app.services.cafes import CafeError, cafes
-from app.services.customer import CustomerError, customer
-from app.services.orders import OrderError, orders
-from app.ui import order_text, show
+from app.services.cafes import CafeError
+from app.services.persistent import cafes
+from app.services.customer import CustomerError
+from app.services.persistent import customer
+from app.services.orders import OrderError
+from app.services.persistent import orders
+from app.message_cleanup import answer_notice
+from app.ui import order_text, show, show_notice
 
 router = Router()
 
 
 async def show_favorites(target: Message | CallbackQuery, user_id: int, page: int = 0):
-    items = customer.list(user_id)
+    items = await customer.list(user_id)
     page = min(max(page, 0), max(0, (len(items) - 1) // FAVORITES_PAGE_SIZE))
     text = "<b>⭐ Избранные напитки</b>\n\n"
     text += (f"Сохранено: {len(items)}. Выберите напиток, чтобы заказать или удалить."
@@ -34,32 +37,23 @@ async def show_favorites(target: Message | CallbackQuery, user_id: int, page: in
 
 
 async def prepare_shortcut(callback: CallbackQuery, kind: str, key: str, break_id: str, session: str):
-    draft = customer.prepare(callback.from_user.id, kind, key, break_id, local_now())
+    draft = await customer.prepare(callback.from_user.id, kind, key, break_id, local_now(), session=session)
     await show_draft(callback, draft, session)
 
 
 async def start_shortcut(callback: CallbackQuery, kind: str, key: str):
     user_id = callback.from_user.id
-    selection = customer.selection(user_id, kind, key)
+    selection = await customer.selection(user_id, kind, key)
     drink = get_drink(selection.cafe_id, selection.drink_id)
     if drink is None:
         raise CustomerError("Напиток больше не представлен в меню. Выберите другой.")
-    cafes.require_orderable(selection.cafe_id, selection.drink_id)
+    await cafes.require_orderable(selection.cafe_id, selection.drink_id)
     now = local_now()
     available = available_breaks(now)
     if not available:
         raise CustomerError(closed_message(now))
-    session = orders.begin(user_id)
-    if not settings.FOLLOW_SCHEDULE:
-        await prepare_shortcut(callback, kind, key, available[0].id, session)
-        return
-    pickups = []
-    for pickup in available:
-        summary = orders.slots(selection.cafe_id, pickup.id, now)
-        pickups.append((pickup, summary.free, summary.limit))
-    await show(callback, f"<b>{escape(CAFES[selection.cafe_id])}</b>\n{escape(drink.name)}\n"
-               f"Текущая цена: <b>{drink.price} ₽</b>\n\nВыберите новую перемену:",
-               shortcut_breaks_keyboard(kind, key, session, pickups))
+    session = await orders.begin(user_id)
+    await prepare_shortcut(callback, kind, key, available[0].id, session)
 
 
 @router.message(Command("favorites"))
@@ -69,9 +63,9 @@ async def favorites_command(message: Message):
 
 @router.message(Command("repeat"))
 async def repeat_command(message: Message):
-    recent = orders.for_user(message.from_user.id)
+    recent = await orders.for_user(message.from_user.id)
     if not recent:
-        await message.answer("У вас пока нет заказов для повторения.")
+        await answer_notice(message, "У вас пока нет заказов для повторения.")
         return
     # Кнопка оставляет пользователю явный выбор, не бронируя слот самой командой.
     await message.answer(order_text(recent[0]), parse_mode="HTML",
@@ -87,9 +81,9 @@ async def customer_callback(callback: CallbackQuery):
             if len(parts) != 2:
                 raise CustomerError("Кнопка устарела.")
             if action == "favorite_add":
-                customer.add_order(user_id, parts[1])
+                await customer.add_order(user_id, parts[1])
             else:
-                customer.add_draft(user_id, parts[1], local_now())
+                await customer.add_draft(user_id, parts[1], local_now())
         except (CustomerError, OrderError) as error:
             await callback.answer(str(error), show_alert=True)
         else:
@@ -102,7 +96,7 @@ async def customer_callback(callback: CallbackQuery):
         if len(parts) != expected.get(action):
             raise CustomerError("Кнопка устарела. Откройте список заново.")
         if action == "repeat_last":
-            recent = orders.for_user(user_id)
+            recent = await orders.for_user(user_id)
             if not recent:
                 raise CustomerError("У вас пока нет заказов для повторения.")
             await start_shortcut(callback, "r", recent[0].reference)
@@ -111,7 +105,7 @@ async def customer_callback(callback: CallbackQuery):
         elif action == "favorites":
             await show_favorites(callback, user_id, int(parts[1]))
         elif action == "favorite":
-            favorite = customer.get(user_id, parts[1])
+            favorite = await customer.get(user_id, parts[1])
             drink = get_drink(favorite.cafe_id, favorite.drink_id)
             text = f"<b>⭐ {escape(favorite.cafe_name)}</b>\n{escape(favorite.drink_name)}\n\n"
             text += f"Текущая цена: <b>{drink.price} ₽</b>" if drink else "Напиток больше не представлен в меню."
@@ -119,17 +113,17 @@ async def customer_callback(callback: CallbackQuery):
         elif action == "favorite_order":
             await start_shortcut(callback, "f", parts[1])
         elif action == "favorite_remove":
-            customer.remove(user_id, parts[1])
+            await customer.remove(user_id, parts[1])
             await show_favorites(callback, user_id)
         elif action == "quick":
             _, kind, key, break_id, session = parts
-            if not orders.valid_session(user_id, session):
+            if not await orders.valid_session(user_id, session):
                 raise CustomerError("Оформление устарело. Начните новый заказ.")
             await prepare_shortcut(callback, kind, key, break_id, session)
         elif action == "rate":
-            order = orders.rate(user_id, parts[1], int(parts[2]))
-            await show(callback, order_text(order) + "\n\nСпасибо за оценку!", student_order_keyboard(order))
+            order = await orders.rate(user_id, parts[1], int(parts[2]))
+            await show_notice(callback, order_text(order) + "\n\nСпасибо за оценку!", student_order_keyboard(order))
     except (CustomerError, OrderError, CafeError) as error:
-        await show(callback, escape(str(error)))
+        await show_notice(callback, escape(str(error)))
     except ValueError:
-        await show(callback, "Некорректная кнопка. Откройте список заново.")
+        await show_notice(callback, "Некорректная кнопка. Откройте список заново.")

@@ -2,16 +2,17 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.catalog import CAFES, CATEGORIES, PRODUCTS, get_drink, size_label
 from app.schedule import Break
-from app.services.cafes import cafes
+from app.services.persistent import cafes
 
 
 def button(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
 
 
-def cafes_keyboard(session: str, counts: dict[str, tuple[int, int]] | None = None) -> InlineKeyboardMarkup:
+async def cafes_keyboard(session: str, counts: dict[str, tuple[int, int]] | None = None) -> InlineKeyboardMarkup:
+    cafes_view = await cafes.view()
     return InlineKeyboardMarkup(inline_keyboard=[
-        [button(f"{'☕' if cafes.is_open(cafe_id) else '⏸'} {name}"
+        [button(f"{'☕' if cafes_view.is_open(cafe_id) else '⏸'} {name}"
                 + (f" · свободно {counts[cafe_id][0]}/{counts[cafe_id][1]}" if counts else ""),
                 f"cafe:{cafe_id}:{session}")]
         for cafe_id, name in CAFES.items()
@@ -27,10 +28,11 @@ def categories_keyboard(cafe_id: str, session: str) -> InlineKeyboardMarkup:
     ] + [[button("← Кофейни", "new_order")]])
 
 
-def drinks_keyboard(cafe_id: str, category: str, session: str) -> InlineKeyboardMarkup:
+async def drinks_keyboard(cafe_id: str, category: str, session: str) -> InlineKeyboardMarkup:
+    cafes_view = await cafes.view()
     rows = []
     for product_id, product in PRODUCTS[cafe_id].items():
-        if product.category == category and cafes.is_available(cafe_id, product_id):
+        if product.category == category and cafes_view.is_available(cafe_id, product_id):
             prefix = "от " if len(product.sizes) > 1 else ""
             rows.append([button(f"{product.name} · {prefix}{min(product.sizes.values())} ₽",
                                 f"product:{cafe_id}:{product_id}:{session}")])

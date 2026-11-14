@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 from datetime import date, datetime, timedelta
 
-from app.schedule import LOCAL_TIMEZONE, available_breaks, daily_breaks
+from app.schedule import LOCAL_TIMEZONE, available_breaks, daily_breaks, order_windows, closed_message
 from app.services.orders import OrderError, OrderService
 
 
@@ -25,7 +25,7 @@ class ScheduleTests(unittest.TestCase):
                          [5, 15, 5, 15, 5, 15, 5, 15, 5])
 
     def test_every_window_boundary(self):
-        for item in daily_breaks(date(2026, 11, 13)):
+        for item in order_windows(date(2026, 11, 13)):
             with self.subTest(item=item.id):
                 self.assertFalse(item.accepts_orders(item.opens_at - timedelta(seconds=1)))
                 self.assertTrue(item.accepts_orders(item.opens_at))
@@ -33,10 +33,34 @@ class ScheduleTests(unittest.TestCase):
                 self.assertFalse(item.accepts_orders(item.closes_at))
                 self.assertFalse(item.accepts_orders(item.starts_at))
 
-    def test_closed_before_day_during_break_and_after_day(self):
-        for now in [at(8, 59), at(9, 40), at(9, 45), at(10, 35), at(17, 10), at(23)]:
-            self.assertEqual(available_breaks(now), [])
-        self.assertEqual(len(available_breaks(at(9, 50))), 1)
+    def test_accepts_before_after_classes_and_through_long_breaks(self):
+        for now in [at(0), at(8, 59), at(9, 39, 59), at(9, 50), at(10, 30),
+                    at(10, 35), at(12, 25), at(17, 10), at(23)]:
+            with self.subTest(now=now):
+                self.assertEqual(len(available_breaks(now)), 1)
+
+    def test_all_five_short_break_pauses_and_exact_boundaries(self):
+        for item in daily_breaks(at(9).date()):
+            if not item.id.endswith('s'):
+                continue
+            with self.subTest(item=item.id):
+                self.assertEqual(len(available_breaks(item.closes_at - timedelta(microseconds=1))), 1)
+                for now in [item.closes_at, item.starts_at, item.ends_at - timedelta(microseconds=1)]:
+                    self.assertEqual(available_breaks(now), [])
+                    self.assertIn(item.ends_at.strftime('%H:%M'), closed_message(now))
+                self.assertEqual(len(available_breaks(item.ends_at)), 1)
+
+    def test_evening_and_following_night_share_one_quota_window(self):
+        before = available_breaks(at(23, 59, 59))[0]
+        after = available_breaks(at(0) + timedelta(days=1))[0]
+        self.assertEqual(before.id, after.id)
+        self.assertTrue(before.is_live)
+        self.assertIn('Выдача по готовности', before.label)
+
+    def test_same_pause_in_utc(self):
+        from datetime import timezone
+        self.assertEqual(available_breaks(at(9, 40).astimezone(timezone.utc)), [])
+        self.assertEqual(available_breaks(at(9, 50)), available_breaks(at(9, 50).astimezone(timezone.utc)))
 
 
 class OrderTests(unittest.TestCase):
@@ -45,7 +69,7 @@ class OrderTests(unittest.TestCase):
         mode.start()
         self.addCleanup(mode.stop)
         self.service = OrderService()
-        self.break_id = daily_breaks(at(9).date())[0].id
+        self.break_id = available_breaks(at(9))[0].id
 
     def prepare(self):
         return self.service.prepare(1, '1', '4_350', self.break_id, at(9, 20))
@@ -69,7 +93,7 @@ class OrderTests(unittest.TestCase):
             self.service.confirm(2, draft.token, at(9, 21))
 
     def test_yesterday_button_and_cancelled_draft(self):
-        yesterday = daily_breaks(at(9).date() - timedelta(days=1))[0].id
+        yesterday = order_windows(at(9).date() - timedelta(days=1))[0].id
         with self.assertRaises(OrderError):
             self.service.prepare(1, '1', '4_350', yesterday, at(9, 20))
         draft = self.prepare()
@@ -111,6 +135,15 @@ class OrderTests(unittest.TestCase):
             repeated = self.service.confirm(1, draft.token, at(9, 30))
             self.assertEqual(repeated.draft.drink_name, order.draft.drink_name)
             self.assertEqual(repeated.draft.price, order.draft.price)
+
+    def test_night_order_can_be_confirmed_after_midnight_in_same_quota(self):
+        now = at(23, 59, 30)
+        pickup = available_breaks(now)[0]
+        draft = self.service.prepare(1, '1', '4_350', pickup.id, now)
+        later = now + timedelta(seconds=60)
+        order = self.service.confirm(1, draft.token, later)
+        self.assertEqual(order.draft.pickup.id, available_breaks(later)[0].id)
+        self.assertEqual(self.service.slots('1', pickup.id, later).free, 9)
 
 
 

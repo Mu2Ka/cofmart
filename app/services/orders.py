@@ -1,4 +1,4 @@
-"""Тестовые заказы в памяти. При перезапуске они удаляются."""
+"""Правила заказов и слотов. PostgreSQL подключён через services.persistent."""
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -8,7 +8,7 @@ from app.catalog import CAFES, get_drink
 from app import settings
 from app.schedule import Break, find_break, find_configurable_break
 from app.services.cafes import CafeError, cafes
-from app.services.roles import roles
+from app.services.roles import AccessError, roles
 
 MAX_COMMENT_LENGTH = 300
 MAX_SLOT_LIMIT = 999
@@ -45,6 +45,11 @@ class SlotSummary:
     confirmed: int
     reserved: int
     revision: int
+    completed: int = 0
+
+    @property
+    def active(self) -> int:
+        return self.confirmed - self.completed
 
     @property
     def free(self) -> int:
@@ -72,12 +77,15 @@ class Order:
 
     @property
     def reference(self) -> str:
-        # Номер удобен человеку, случайная часть защищает от кнопок до перезапуска.
+        # Номер удобен человеку, случайная часть не даёт открыть заказ по одному номеру.
         return f"{self.number}-{self.key}"
 
 
 class OrderService:
-    def __init__(self):
+    def __init__(self, role_service=roles, cafe_service=cafes, number_factory=None):
+        self.roles = role_service
+        self.cafes = cafe_service
+        self.number_factory = number_factory
         self.drafts: dict[int, Draft] = {}
         self.confirmed: dict[str, Order] = {}
         self.sessions: dict[int, str] = {}
@@ -99,6 +107,18 @@ class OrderService:
     def valid_session(self, user_id: int, session: str) -> bool:
         return self.sessions.get(user_id) == session
 
+    def navigate(self, user_id: int, session: str) -> bool:
+        if not self.valid_session(user_id, session):
+            return False
+        self.discard_draft(user_id)
+        return True
+
+    def cancel_session(self, user_id: int, session: str) -> bool:
+        if not self.valid_session(user_id, session):
+            return False
+        self.cancel(user_id)
+        return True
+
     def cancel(self, user_id: int) -> None:
         self.discard_draft(user_id)
         self.sessions.pop(user_id, None)
@@ -110,8 +130,10 @@ class OrderService:
         self.waiting_comments.pop(user_id, None)
 
     def prepare(self, user_id: int, cafe_id: str, drink_id: str,
-                break_id: str, now: datetime, comment: str = "") -> Draft:
+                break_id: str, now: datetime, comment: str = "", session: str | None = None) -> Draft:
         """Черновик фиксирует название и цену, но ещё не создаёт заказ."""
+        if session is not None and not self.valid_session(user_id, session):
+            raise OrderError("Оформление устарело. Начните новый заказ.")
         drink = get_drink(cafe_id, drink_id)
         if not isinstance(comment, str) or len(comment.strip()) > MAX_COMMENT_LENGTH:
             raise OrderError(f"Комментарий должен быть текстом до {MAX_COMMENT_LENGTH} символов.")
@@ -120,7 +142,7 @@ class OrderService:
         self.check_availability(cafe_id, drink_id)
         pickup = find_break(break_id, now)
         if pickup is None:
-            raise OrderError("Приём на этот перерыв закрыт. Начните новый заказ.")
+            raise OrderError("Этот период приёма закрыт. Начните новый заказ.")
         if self.slots(cafe_id, pickup.id, now, exclude_user=user_id).free < 1:
             raise OrderError("На этот перерыв свободных слотов нет. Выберите другую кофейню.")
         deadline = pickup.ends_at if pickup.is_test else pickup.closes_at
@@ -135,10 +157,9 @@ class OrderService:
         self.waiting_comments.pop(user_id, None)
         return draft
 
-    @staticmethod
-    def check_availability(cafe_id: str, drink_id: str):
+    def check_availability(self, cafe_id: str, drink_id: str):
         try:
-            cafes.require_orderable(cafe_id, drink_id)
+            self.cafes.require_orderable(cafe_id, drink_id)
         except CafeError as error:
             raise OrderError(str(error)) from error
 
@@ -191,11 +212,40 @@ class OrderService:
         if self.slots(draft.cafe_id, draft.pickup.id, now, exclude_user=user_id).free < 1:
             self.discard_draft(user_id)
             raise OrderError("Свободных слотов больше нет. Начните новый заказ.")
-        order = Order(len(self.confirmed) + 1, draft, created_at=now, updated_at=now)
+        number = self.number_factory() if self.number_factory else max(self.order_tokens, default=0) + 1
+        order = Order(number, draft, created_at=now, updated_at=now)
         self.confirmed[token] = order
         self.order_tokens[order.number] = token
         self.cancel(user_id)
         return order
+
+    def confirm_once(self, user_id: int, token: str, now: datetime) -> tuple[Order, bool]:
+        existing = token in self.confirmed
+        return self.confirm(user_id, token, now), not existing
+
+    def session(self, user_id: int) -> str:
+        return self.sessions.get(user_id, "")
+
+    def waiting_comment(self, user_id: int) -> str | None:
+        return self.waiting_comments.get(user_id)
+
+    def slot_edit(self, user_id: int) -> SlotEdit | None:
+        return self.slot_edits.get(user_id)
+
+    def clear_slot_edit(self, user_id: int):
+        self.slot_edits.pop(user_id, None)
+
+    def save_slot_edit(self, actor_id: int, limit: int, now: datetime) -> SlotEdit:
+        edit = self.slot_edits.get(actor_id)
+        if edit is None:
+            raise SlotEditExpired("Ввод лимита уже завершён. Откройте перемену заново.")
+        try:
+            self.set_slot_limit(actor_id, edit.cafe_id, edit.break_id, limit, now, edit.revision)
+        except (AccessError, SlotEditExpired):
+            self.clear_slot_edit(actor_id)
+            raise
+        self.clear_slot_edit(actor_id)
+        return edit
 
     def expire_reservations(self, now: datetime):
         for user_id, draft in list(self.drafts.items()):
@@ -210,14 +260,25 @@ class OrderService:
         reserved = sum(draft.cafe_id == cafe_id and draft.pickup.id == break_id
                        and user_id != exclude_user for user_id, draft in self.drafts.items())
         key = (cafe_id, break_id)
+        completed = sum(order.draft.cafe_id == cafe_id and order.draft.pickup.id == break_id
+                        and order.status == "done" for order in self.confirmed.values())
         return SlotSummary(self.slot_limits.get(key, settings.DEFAULT_SLOTS_PER_BREAK),
-                           confirmed, reserved, self.slot_revisions.get(key, self.slot_epoch))
+                           confirmed, reserved, self.slot_revisions.get(key, self.slot_epoch), completed)
+
+    def add_slots(self, actor_id: int, cafe_id: str, break_id: str, count: int,
+                  now: datetime, revision: int) -> SlotSummary:
+        self.roles.require_cafe(actor_id, cafe_id)
+        if type(count) is not int or not 1 <= count <= MAX_SLOT_LIMIT:
+            raise OrderError("Число добавляемых слотов должно быть положительным целым числом.")
+        current = self.slots(cafe_id, break_id, now)
+        # Общий лимит растёт, выданные заказы продолжают расходовать свою часть квоты.
+        return self.set_slot_limit(actor_id, cafe_id, break_id, current.limit + count, now, revision)
 
     def set_slot_limit(self, actor_id: int, cafe_id: str, break_id: str, limit: int,
                        now: datetime, revision: int | None = None) -> SlotSummary:
-        roles.require_cafe(actor_id, cafe_id)
+        self.roles.require_cafe(actor_id, cafe_id)
         if find_configurable_break(break_id, now) is None:
-            raise SlotEditExpired("Эта перемена уже закрыта. Обновите список перемен.")
+            raise SlotEditExpired("Этот период приёма уже закрыт. Обновите список.")
         if type(limit) is not int or not 0 <= limit <= MAX_SLOT_LIMIT:
             raise OrderError(f"Лимит должен быть целым числом от 0 до {MAX_SLOT_LIMIT}.")
         current = self.slots(cafe_id, break_id, now)
@@ -232,9 +293,9 @@ class OrderService:
         return self.slots(cafe_id, break_id, now)
 
     def start_slot_edit(self, actor_id: int, cafe_id: str, break_id: str, now: datetime):
-        roles.require_cafe(actor_id, cafe_id)
+        self.roles.require_cafe(actor_id, cafe_id)
         if find_configurable_break(break_id, now) is None:
-            raise OrderError("Эта перемена уже закрыта. Обновите список перемен.")
+            raise OrderError("Этот период приёма уже закрыт. Обновите список.")
         revision = self.slots(cafe_id, break_id, now).revision
         self.cancel(actor_id)
         self.slot_edits[actor_id] = SlotEdit(cafe_id, break_id, revision)
@@ -242,7 +303,7 @@ class OrderService:
     def get_order(self, number: int) -> Order:
         token = self.order_tokens.get(number)
         if token is None:
-            raise OrderError("Заказ не найден. Возможно, бот был перезапущен.")
+            raise OrderError("Заказ не найден. Обновите список заказов.")
         return self.confirmed[token]
 
     def resolve_reference(self, reference: str) -> Order:
@@ -274,7 +335,7 @@ class OrderService:
         return updated
 
     def for_cafe(self, actor_id: int, cafe_id: str, status: str = "active") -> list[Order]:
-        roles.require_cafe(actor_id, cafe_id)
+        self.roles.require_cafe(actor_id, cafe_id)
         if status not in STATUSES and status != "active":
             raise OrderError("Неизвестный фильтр заказов.")
         result = [order for order in self.confirmed.values() if order.draft.cafe_id == cafe_id
@@ -283,7 +344,7 @@ class OrderService:
 
     def for_staff(self, actor_id: int, number: int) -> Order:
         order = self.get_order(number)
-        roles.require_cafe(actor_id, order.draft.cafe_id)
+        self.roles.require_cafe(actor_id, order.draft.cafe_id)
         return order
 
     def rating_summary(self, actor_id: int, cafe_id: str) -> tuple[int, float | None]:
@@ -297,7 +358,7 @@ class OrderService:
             raise OrderError("Карточка устарела. Откройте заказ заново.")
         if status not in TRANSITIONS[order.status]:
             raise OrderError("Этот переход статуса недоступен.")
-        if order.barista_id not in {None, actor_id} and not roles.is_admin(actor_id):
+        if order.barista_id not in {None, actor_id} and not self.roles.is_admin(actor_id):
             raise OrderError("Заказ уже взял другой бариста. Изменить его может он или администратор.")
         updated = replace(order, status=status, revision=order.revision + 1,
                           barista_id=order.barista_id or actor_id, updated_at=now)
