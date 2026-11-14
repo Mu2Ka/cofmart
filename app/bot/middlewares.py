@@ -20,7 +20,8 @@ class ServicesMiddleware(BaseMiddleware):
         self.mini_app_url = mini_app_url
 
     async def __call__(self, handler, event, data):
-        data.update(catalog=self.catalog, orders=self.orders, slots=self.slots, mini_app_url=self.mini_app_url)
+        url = self.mini_app_url() if callable(self.mini_app_url) else self.mini_app_url
+        data.update(catalog=self.catalog, orders=self.orders, slots=self.slots, mini_app_url=url)
         try:
             return await handler(event, data)
         except BusinessError as exc:

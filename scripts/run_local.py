@@ -76,15 +76,47 @@ def node_binary():
 
 def tunnel_url(process, log_path):
     for _ in range(120):
+        if STOP.exists():
+            raise KeyboardInterrupt
         if log_path.exists():
             text = log_path.read_text(encoding='utf-8', errors='replace')
-            match = re.search(r'https://[a-z0-9-]+(?:\.app)?\.lhr\.life', text)
-            if match:
-                return match.group(0)
+            address = latest_tunnel_url(text)
+            if address:
+                return address
         if process.poll() is not None:
             break
         time.sleep(0.5)
     raise RuntimeError('HTTPS tunnel failed to start. See .local/tunnel.log.')
+
+
+def latest_tunnel_url(text):
+    addresses = re.findall(r'https://[a-z0-9-]+(?:\.app)?\.lhr\.life', text)
+    return addresses[-1] if addresses else None
+
+
+def healthy(url):
+    try:
+        with LOCAL_HTTP.open(url.rstrip('/') + '/api/health', timeout=3) as response:
+            return response.status == 200 and json.load(response) == {'status': 'ok'}
+    except (OSError, urllib.error.URLError, ValueError):
+        return False
+
+
+def stop_process(process):
+    if process is None or process.poll() is not None:
+        return
+    if os.name == 'nt':
+        # venv python.exe is a redirector: terminating only it leaves the real
+        # Python child alive, which can continue polling Telegram.
+        subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=FLAGS)
+    else:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 async def configure_telegram(token, public_url):
@@ -133,13 +165,15 @@ async def cafes_without_times(settings):
 
 def wait_for(url, process):
     for _ in range(60):
+        if STOP.exists():
+            raise KeyboardInterrupt
         if process.poll() is not None:
             raise RuntimeError(f'Process exited before {url} was ready; see .local logs.')
         try:
-            with LOCAL_HTTP.open(url, timeout=1) as response:
-                if response.status == 200:
+            with LOCAL_HTTP.open(url, timeout=3) as response:
+                if response.status == 200 and json.load(response) == {'status': 'ok'}:
                     return
-        except (OSError, urllib.error.URLError):
+        except (OSError, urllib.error.URLError, ValueError):
             pass
         time.sleep(0.5)
     raise RuntimeError(f'Timed out waiting for {url}; see .local logs.')
@@ -163,6 +197,7 @@ def serve():
     started_postgres = False
     try:
         STOP.unlink(missing_ok=True)
+        (RUNTIME / 'processes.json').write_text(json.dumps({'launcher': os.getpid()}), encoding='utf-8')
         load_dotenv(ROOT / '.env')
         settings = get_settings()
         url = make_url(settings.database_url)
@@ -217,25 +252,43 @@ def serve():
                 stdout=output, stderr=subprocess.STDOUT, creationflags=FLAGS,
             )
             children.append((name, process))
+            (RUNTIME / 'processes.json').write_text(json.dumps({'launcher': os.getpid(), **{n: p.pid for n, p in children}}), encoding='utf-8')
             return process
 
         uvicorn = [sys.executable, '-m', 'uvicorn']
         api = launch('web', [*uvicorn, 'app.web:create_web_app', '--factory', '--host', '127.0.0.1', '--port', '8000', '--no-access-log'])
         wait_for('http://127.0.0.1:8000/api/health', api)
-        (RUNTIME / 'tunnel.log').write_text('', encoding='utf-8')
-        tunnel = launch('tunnel', [
+        tunnel_command = [
             tunnel_binary, '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
             '-o', f'UserKnownHostsFile="{(RUNTIME / "tunnel-known-hosts").as_posix()}"',
             '-o', 'IdentityFile=none', '-o', 'IdentityAgent=none',
             '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes',
             '-R', '80:127.0.0.1:8000', 'nokey@localhost.run',
-        ])
-        public_url = tunnel_url(tunnel, RUNTIME / 'tunnel.log')
-        wait_for(public_url + '/api/health', tunnel)
-        username = asyncio.run(configure_telegram(settings.bot_token, public_url))
-        bot = launch('bot', [sys.executable, ROOT / 'main.py'], {'MINI_APP_URL': public_url})
-        (RUNTIME / 'processes.json').write_text(json.dumps({name: p.pid for name, p in children}), encoding='utf-8')
-        (RUNTIME / 'mini-app-url.txt').write_text(public_url, encoding='utf-8')
+        ]
+
+        def start_tunnel():
+            (RUNTIME / 'tunnel.log').write_text('', encoding='utf-8')
+            connection = launch('tunnel', tunnel_command)
+            try:
+                address = tunnel_url(connection, RUNTIME / 'tunnel.log')
+                wait_for(address + '/api/health', connection)
+                return connection, address
+            except BaseException:
+                stop_process(connection)
+                children.remove(('tunnel', connection))
+                raise
+
+        def publish_url(address):
+            username = asyncio.run(configure_telegram(settings.bot_token, address))
+            temporary = RUNTIME / 'mini-app-url.tmp'
+            temporary.write_text(address, encoding='utf-8')
+            temporary.replace(RUNTIME / 'mini-app-url.txt')
+            return username
+
+        tunnel, public_url = start_tunnel()
+        username = publish_url(public_url)
+        published_url = public_url
+        bot = launch('bot', [sys.executable, ROOT / 'main.py'], {'MINI_APP_URL': public_url, 'COFMART_LOCAL_RUNTIME': '1'})
         (RUNTIME / 'bot-username.txt').write_text(username, encoding='utf-8')
         print('\nPROJECT IS RUNNING', flush=True)
         print(f'Telegram: https://t.me/{username}', flush=True)
@@ -244,26 +297,53 @@ def serve():
         print('API docs: http://localhost:8000/api/docs', flush=True)
         print('Keep this window open. Stop with Ctrl+C or start-local.cmd --stop.\n', flush=True)
         bot_warning = False
+        next_probe = time.monotonic() + 10
+        failures = 0
         while not STOP.exists():
             for name, process in children:
                 if process.poll() is not None:
+                    if name == 'tunnel':
+                        continue
                     if name != 'bot':
                         raise RuntimeError(f'{name} exited. See .local/{name}.log')
                     if not bot_warning:
                         print('Bot stopped; see .local/bot.log. Mini App server remains available.', flush=True)
                         bot_warning = True
+            if time.monotonic() >= next_probe:
+                candidate = latest_tunnel_url((RUNTIME / 'tunnel.log').read_text(encoding='utf-8', errors='replace'))
+                available = tunnel is not None and tunnel.poll() is None and healthy(candidate or public_url)
+                if available:
+                    failures = 0
+                    if candidate and candidate != published_url:
+                        try:
+                            publish_url(candidate)
+                            public_url = published_url = candidate
+                            print(f'Mini App address updated: {public_url}', flush=True)
+                        except Exception:
+                            print('Telegram menu update delayed; will retry.', flush=True)
+                else:
+                    failures += 1
+                if failures >= 2 or tunnel is None or tunnel.poll() is not None:
+                    print('HTTPS tunnel unavailable; reconnecting without restarting the bot...', flush=True)
+                    stop_process(tunnel)
+                    if ('tunnel', tunnel) in children:
+                        children.remove(('tunnel', tunnel))
+                    tunnel = None
+                    try:
+                        tunnel, public_url = start_tunnel()
+                        publish_url(public_url)
+                        published_url = public_url
+                        failures = 0
+                        print(f'Mini App restored: {public_url}. Reopen it from the bot menu.', flush=True)
+                    except Exception:
+                        print('Tunnel recovery failed; retrying in 10 seconds. See .local/tunnel.log.', flush=True)
+                next_probe = time.monotonic() + 10
             time.sleep(1)
     except KeyboardInterrupt:
         print('\nStopping local project...', flush=True)
     finally:
         for _, process in reversed(children):
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+            stop_process(process)
         for output in handles:
             output.close()
         if started_postgres:
