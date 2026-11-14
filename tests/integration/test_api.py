@@ -40,6 +40,7 @@ async def test_api_order_visible_in_shared_service_and_vice_versa(client, db):
     assert (await service.get(1001, order["id"])).total_minor == 57000
     bot_order = await service.create(1001, OrderCommand(1, 1, [ItemInput(2, 1)], 16000, "bot-1"))
     history = (await client.get("/orders", headers=headers)).json()
+    assert (await client.get('/orders',headers=headers)).headers['cache-control'] == 'no-store'
     assert {x["id"] for x in history} == {order["id"], bot_order.id}
     other = {"Authorization": f"tma {init_data(user_id=1002)}"}
     assert (await client.get(f'/orders/{order["id"]}', headers=other)).status_code == 404
@@ -61,3 +62,10 @@ async def test_cors_is_explicit(client):
     assert (await client.options("/orders", headers=headers)).headers["access-control-allow-origin"] == "https://mini.example"
     response = await client.options("/orders", headers={**headers, "Origin": "https://other.example"})
     assert "access-control-allow-origin" not in response.headers
+
+
+async def test_out_of_range_identifiers_are_validation_errors(client):
+    headers = {'Authorization':'tma ' + init_data()}
+    for value in ('0','-1',str(2**63)):
+        for path in (f'/orders/{value}',f'/cafes/{value}/menu',f'/cafes/{value}/slots'):
+            assert (await client.get(path,headers=headers)).status_code == 422

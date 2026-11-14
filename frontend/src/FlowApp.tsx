@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { initData } from "./telegram";
+import { ApiError, request } from './api';
 import {
   act,
   loadState,
@@ -8,6 +9,7 @@ import {
   type Staff,
   type Product,
   type Order,
+  type Draft,
 } from "./flow-api";
 
 type View =
@@ -28,7 +30,8 @@ const rub = (n: number) =>
   new Intl.NumberFormat("ru-RU", {
     style: "currency",
     currency: "RUB",
-    maximumFractionDigits: 0,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
   }).format(n);
 const sizeLabel = (size: string) =>
   size === "portion" ? "порция" : `${size} мл`;
@@ -65,17 +68,58 @@ export default function FlowApp() {
     }[]
   >([]);
   const inFlight = useRef(false);
+  const refreshVersion = useRef(0);
   const cafe = state?.cafes.find((c) => c.id === cafeId);
   const roleAccess = !!state?.staff_cafes.includes(cafeId);
 
   async function refresh() {
-    const next = await loadState();
-    setState(next);
-    return next;
+    const version = ++refreshVersion.current;
+    try {
+      const next = await loadState();
+      if (version === refreshVersion.current) setState(next);
+      return next;
+    } catch(e) {
+      if (version === refreshVersion.current && e instanceof ApiError && [401,403].includes(e.status)) {
+        setState(null); setStaff(null); setPrevious([]);
+      }
+      throw e;
+    }
   }
   useEffect(() => {
     if (initData) refresh().catch((e) => setError(e.message));
   }, []);
+  useEffect(() => {
+    if (!initData) return;
+    async function poll() {
+      if (inFlight.current || document.hidden) return;
+      try {
+        const data = await refresh();
+        if (view === 'staff') {
+          if (data.staff_cafes.includes(cafeId)) setStaff(await loadStaff(cafeId));
+          else { setStaff(null); setView('admin'); }
+        }
+      } catch (e) {
+        if (e instanceof ApiError && [401,403].includes(e.status)) {
+          setState(null); setStaff(null); setError(e.message);
+        }
+      }
+    }
+    const timer = window.setInterval(poll, 15000);
+    window.addEventListener('focus', poll);
+    document.addEventListener('visibilitychange', poll);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', poll);
+      document.removeEventListener('visibilitychange', poll);
+    };
+  }, [view, cafeId]);
+  useEffect(() => {
+    if (!notice) return;
+    const ttl = state?.service_message_ttl_seconds ?? 60;
+    if (!ttl) return;
+    const timer = window.setTimeout(() => setNotice(''), ttl * 1000);
+    return () => clearTimeout(timer);
+  }, [notice, state?.service_message_ttl_seconds]);
   async function run(
     action: string,
     values: Record<string, unknown> = {},
@@ -87,16 +131,45 @@ export default function FlowApp() {
     setError("");
     setNotice("");
     try {
+      if (action === 'prepare' && !values.break_id) {
+        const current = await refresh();
+        if (!current.periods.length) throw new Error(current.schedule_message);
+        values = {...values, break_id:current.periods[0].id, session:current.session};
+      }
+      if (action === 'confirm' && state?.draft && comment.trim() !== state.draft.comment) {
+        const saved = await act<Draft>('comment', {token: state.draft.token, comment});
+        values = { ...values, token: saved.result.token };
+        setState(current => current ? {...current, draft:saved.result} : current);
+      }
       await act(action, values);
+      if (action === 'cancel' && next === 'cafes') await act('begin');
       const data = await refresh();
-      if (next) setView(next);
+      if (next) { setView(next); setPage(0); }
+      if (['favorite_remove','transition'].includes(action)) setPage(0);
+      if (['set_slots','add_slots'].includes(action)) setLimit({});
       if (next === "draft") setComment(data.draft?.comment ?? "");
       if (action === "confirm")
         setNotice("Заказ подтверждён. Оплата пока не подключена.");
       if (view === "staff" && data.staff_cafes.includes(cafeId))
         setStaff(await loadStaff(cafeId));
+      else if (view === 'staff') { setStaff(null); setView('admin'); }
       return true;
     } catch (e) {
+      if (e instanceof ApiError && e.status === 401) { setState(null); setStaff(null); }
+      else {
+        try {
+          const recovered = await refresh();
+          if (view === 'staff' && recovered.staff_cafes.includes(cafeId)) setStaff(await loadStaff(cafeId));
+          if (action === 'confirm' && recovered.orders.some(order => order.draft.token === values.token)) {
+            setView('orders'); setPage(0); setError('');
+            setNotice('Заказ подтверждён. Оплата пока не подключена.');
+            return true;
+          }
+        } catch { /* Keep the original action error. */ }
+      }
+      if (view === 'staff' && e instanceof ApiError && e.status === 403) {
+        setStaff(null); setView('admin');
+      }
       setError(
         e instanceof Error ? e.message : "Не удалось выполнить действие.",
       );
@@ -107,6 +180,8 @@ export default function FlowApp() {
     }
   }
   async function openStaff(id: string) {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     setError("");
     try {
@@ -117,21 +192,18 @@ export default function FlowApp() {
     } catch (e) {
       setError((e as Error).message);
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }
   async function chooseSku(sku: string) {
-    if (!state?.periods.length) {
-      setError(state?.schedule_message ?? "Приём закрыт");
-      return;
-    }
     await run(
       "prepare",
       {
         cafe_id: cafeId,
         drink_id: sku,
-        break_id: state.periods[0].id,
-        session: state.session,
+        break_id: state?.periods[0]?.id ?? '',
+        session: state?.session ?? '',
         comment: "",
       },
       "draft",
@@ -144,6 +216,11 @@ export default function FlowApp() {
     setProduct(null);
   }
   function navigate(next: View) {
+    if (inFlight.current) return;
+    if (state?.draft && next !== 'draft') {
+      void run('cancel', {session: state.session}, next);
+      return;
+    }
     setView(next);
     setPage(0);
     setError("");
@@ -214,7 +291,7 @@ export default function FlowApp() {
                 {!!state.staff_cafes.length && (
                   <button
                     onClick={() => {
-                      setView("admin");
+                      navigate("admin");
                       setPage(0);
                     }}
                   >
@@ -285,11 +362,11 @@ export default function FlowApp() {
                     <span>КОФЕЙНЯ</span>
                     <strong>{c.name}</strong>
                     <span>
-                      {c.open ? "Приём открыт" : "⏸ Приём остановлен"}
+                      {!c.open ? "⏸ Приём остановлен" : !state.periods.length ? 'Пауза по расписанию' : 'Приём открыт'}
                     </span>
                     <span>
-                      Свободно {c.open ? (c.slots?.free ?? 0) : 0}/
-                      {c.slots?.limit ?? 0} слотов
+                      {c.slots ? `Свободно ${c.open ? c.slots.free : 0}/${c.slots.limit} слотов`
+                        : 'Просмотр меню доступен'}
                     </span>
                   </button>
                 ))}
@@ -442,12 +519,11 @@ export default function FlowApp() {
                 <label className="field">
                   Добавить / изменить комментарий
                   <textarea
-                    maxLength={300}
                     value={comment}
-                    onChange={(e) => setComment(e.target.value)}
+                    onChange={(e) => setComment(Array.from(e.target.value).slice(0,300).join(''))}
                     placeholder="Например: американо со льдом"
                   />
-                  <small>{comment.length}/300</small>
+                  <small>{Array.from(comment).length}/300</small>
                 </label>
                 <div className="flow-actions">
                   <button
@@ -575,9 +651,13 @@ export default function FlowApp() {
               <button
                 className="quiet"
                 onClick={async () => {
-                  const { request } = await import("./api");
-                  setPrevious(await request("/orders"));
-                  navigate("previous");
+                  if (inFlight.current) return;
+                  inFlight.current = true; setBusy(true); setError('');
+                  try {
+                    setPrevious(await request<typeof previous>("/orders"));
+                    setView('previous'); setPage(0);
+                  } catch(e) { setError((e as Error).message); }
+                  finally { inFlight.current = false; setBusy(false); }
                 }}
               >
                 Заказы ранней версии
@@ -798,6 +878,7 @@ export default function FlowApp() {
                     {[1, 5].map((value) => (
                       <button
                         key={value}
+                        disabled={p.limit + value > 999}
                         onClick={() =>
                           run("add_slots", {
                             cafe_id: cafeId,
@@ -825,6 +906,7 @@ export default function FlowApp() {
                   </label>
                   <button
                     className="secondary"
+                    disabled={!/^\d{1,3}$/.test(limit[p.id] ?? String(p.limit))}
                     onClick={() =>
                       run("set_slots", {
                         cafe_id: cafeId,
@@ -877,7 +959,7 @@ export default function FlowApp() {
                   </label>
                   <div className="flow-actions">
                     <button
-                      disabled={!/^[1-9]\d*$/.test(target)}
+                      disabled={!/^[1-9]\d*$/.test(target) || !Number.isSafeInteger(Number(target))}
                       onClick={() =>
                         run("assign", {
                           cafe_id: cafeId,
@@ -890,7 +972,7 @@ export default function FlowApp() {
                     </button>
                     <button
                       className="secondary"
-                      disabled={!/^[1-9]\d*$/.test(target)}
+                      disabled={!/^[1-9]\d*$/.test(target) || !Number.isSafeInteger(Number(target))}
                       onClick={() =>
                         run("assign", {
                           cafe_id: cafeId,

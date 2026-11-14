@@ -64,6 +64,7 @@ export type State = {
   categories: Record<string, string>;
   periods: { id: string; label: string }[];
   follow_schedule: boolean;
+  service_message_ttl_seconds?: number;
   schedule_message: string;
   pauses: string[];
   session: string;
@@ -80,5 +81,5 @@ export type Staff = {
 };
 export const loadState = () => request<State>("/flow/state");
 export const loadStaff = (id: string) => request<Staff>(`/flow/staff/${id}`);
-export const act = (action: string, values: Record<string, unknown> = {}) =>
-  request<{ result: unknown }>("/flow/action", { action, ...values });
+export const act = <T = unknown>(action: string, values: Record<string, unknown> = {}) =>
+  request<{ result: T }>("/flow/action", { action, ...values });

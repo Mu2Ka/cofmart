@@ -5,6 +5,7 @@
   "packageManager": "pnpm@11.25.0",
   "type": "module",
   "scripts": {
+    "test": "playwright test",
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0"
@@ -14,6 +15,7 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "typescript": "^5.9.3",

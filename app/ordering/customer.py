@@ -6,6 +6,7 @@ from datetime import datetime
 from secrets import token_hex
 
 from app.ordering.catalog import CAFES, get_drink
+from app.ordering.schedule import available_breaks, closed_message
 from app.ordering.orders import Draft, OrderService, orders
 
 MAX_FAVORITES = 30
@@ -85,6 +86,14 @@ class CustomerService:
         selection = self.selection(user_id, kind, key)
         return self.orders.prepare(user_id, selection.cafe_id, selection.drink_id,
                                    break_id, now, comment=selection.comment, session=session)
+
+    def prepare_shortcut(self, user_id: int, kind: str, key: str, now: datetime) -> Draft:
+        selection = self.selection(user_id, kind, key)
+        periods = available_breaks(now)
+        if not periods:
+            raise CustomerError(closed_message(now))
+        return self.orders.prepare_new(user_id, selection.cafe_id, selection.drink_id,
+                                       periods[0].id, now, comment=selection.comment)
 
 
 customer = CustomerService(orders)

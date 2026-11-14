@@ -163,6 +163,14 @@ class OrderService:
         except CafeError as error:
             raise OrderError(str(error)) from error
 
+    def prepare_new(self, user_id: int, cafe_id: str, drink_id: str, break_id: str,
+                    now: datetime, comment: str = '') -> Draft:
+        # Keep an existing valid reservation if the replacement is rejected.
+        draft = self.prepare(user_id, cafe_id, drink_id, break_id, now, comment=comment)
+        self.sessions[user_id] = token_hex(4)
+        self.slot_edits.pop(user_id, None)
+        return draft
+
     def get_draft(self, user_id: int, token: str, now: datetime) -> Draft:
         draft = self.drafts.get(user_id)
         if draft is None or draft.token != token:
@@ -218,6 +226,16 @@ class OrderService:
         self.order_tokens[order.number] = token
         self.cancel(user_id)
         return order
+
+    def edit_comment(self, user_id: int, token: str, text: str, now: datetime) -> Draft:
+        """Mini App edits atomically; clearing the field explicitly clears the comment."""
+        draft = self.get_draft(user_id, token, now)
+        if not isinstance(text, str) or len(text.strip()) > MAX_COMMENT_LENGTH:
+            raise OrderError(f"Комментарий должен быть текстом до {MAX_COMMENT_LENGTH} символов.")
+        updated = replace(draft, token=token_hex(8), comment=text.strip())
+        self.drafts[user_id] = updated
+        self.waiting_comments.pop(user_id, None)
+        return updated
 
     def confirm_once(self, user_id: int, token: str, now: datetime) -> tuple[Order, bool]:
         existing = token in self.confirmed

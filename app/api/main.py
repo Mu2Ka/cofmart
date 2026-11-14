@@ -25,12 +25,23 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
         app.state.settings = config
         app.state.db = database or Database(config.database_url)
         try:
+            if app.state.db.engine.dialect.name == 'postgresql':
+                from app.db.readiness import ensure_schema
+                await ensure_schema(app.state.db)
+                from app.ordering.seed import seed
+                await seed(app.state.db.sessions)
             yield
         finally:
             if database is None:
                 await app.state.db.close()
 
     application = FastAPI(title="Cofmart API", lifespan=lifespan)
+
+    @application.middleware('http')
+    async def private_responses(request, call_next):
+        response = await call_next(request)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
     # Origins are read at factory invocation for explicit, predictable CORS configuration.
     config = settings or get_settings()
     application.add_middleware(

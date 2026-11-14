@@ -43,17 +43,8 @@ async def prepare_shortcut(callback: CallbackQuery, kind: str, key: str, break_i
 
 async def start_shortcut(callback: CallbackQuery, kind: str, key: str):
     user_id = callback.from_user.id
-    selection = await customer.selection(user_id, kind, key)
-    drink = get_drink(selection.cafe_id, selection.drink_id)
-    if drink is None:
-        raise CustomerError("Напиток больше не представлен в меню. Выберите другой.")
-    await cafes.require_orderable(selection.cafe_id, selection.drink_id)
-    now = local_now()
-    available = available_breaks(now)
-    if not available:
-        raise CustomerError(closed_message(now))
-    session = await orders.begin(user_id)
-    await prepare_shortcut(callback, kind, key, available[0].id, session)
+    draft = await customer.prepare_shortcut(user_id, kind, key, local_now())
+    await show_draft(callback, draft, await orders.session(user_id))
 
 
 @router.message(Command("favorites"))

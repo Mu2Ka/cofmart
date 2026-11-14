@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 
 from app.api.dependencies import current_user, orders
 from app.api.schemas import OrderRequest, PreviewRequest
@@ -24,5 +24,5 @@ async def history(user: int = Depends(current_user), service: OrderService = Dep
 
 
 @router.get("/{order_id}", response_model=OrderData)
-async def detail(order_id: int, user: int = Depends(current_user), service: OrderService = Depends(orders)):
+async def detail(order_id: int = Path(gt=0, le=2**31-1), user: int = Depends(current_user), service: OrderService = Depends(orders)):
     return await service.get(user, order_id)

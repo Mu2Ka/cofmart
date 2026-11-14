@@ -1,10 +1,13 @@
 """HTTP adapter to the unchanged ordering rules from main (ef9595f)."""
 import json
+import logging
 from dataclasses import asdict
 from types import SimpleNamespace
 from urllib.parse import parse_qsl
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError
+from sqlalchemy.exc import SQLAlchemyError
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,6 +27,7 @@ router = APIRouter(prefix='/flow', tags=['Full bot workflow'])
 class Scope:
     def __init__(self, uid, store):
         self.uid = uid
+        self.store = store
         self.orders = PersistentService('orders', store)
         self.customer = PersistentService('customer', store)
         self.cafes = PersistentService('cafes', store)
@@ -57,15 +61,14 @@ def order_data(order, actor_id=None, admin=False):
 
 @router.get('/state')
 async def state(service: Scope = Depends(scope)):
-    uid, now = service.uid, local_now()
-    await service.orders.expire_reservations(now)
-    roles = await service.roles.view()
-    cafes = await service.cafes.view()
+    view = await service.store.call('state', 'current', local_now())
+    uid, now = service.uid, view.now
+    roles, cafes, orders, customer = view.roles, view.cafes, view.orders, view.customer
     current = available_breaks(now)
     result = []
     summaries = {}
     for cid, name in CAFES.items():
-        slots = await service.orders.slots(cid, current[0].id, now) if current else None
+        slots = orders.slots(cid, current[0].id, now) if current else None
         result.append({'id': cid, 'name': name, 'open': cafes.is_open(cid),
                        'slots': {**asdict(slots), 'free': slots.free} if slots else None,
                        'products': [{'id': pid, **asdict(product), 'available': cafes.is_available(cid, pid),
@@ -75,60 +78,63 @@ async def state(service: Scope = Depends(scope)):
                            for drink in [get_drink(cid, sku)]}}
                                     for pid, product in PRODUCTS[cid].items()]})
         if roles.is_admin(uid):
-            summaries[cid] = {label: len(await service.orders.for_cafe(uid, cid, status))
+            summaries[cid] = {label: len(orders.for_cafe(uid, cid, status))
                               for status, label in STATUSES.items()}
-    view = await service.orders.view()
     return {'user_id': uid, 'admin': roles.is_admin(uid), 'staff_cafes': sorted(roles.cafes_for(uid)),
             'cafes': result, 'categories': CATEGORIES, 'follow_schedule': settings.FOLLOW_SCHEDULE,
+            'service_message_ttl_seconds': settings.SERVICE_MESSAGE_TTL_SECONDS,
             'periods': [{'id': item.id, 'label': item.label} for item in current],
             'schedule_message': closed_message(now),
             'pauses': [f'{item.closes_at:%H:%M}–{item.ends_at:%H:%M}' for item in daily_breaks(now.date()) if item.id.endswith('s')],
-            'session': view.session(uid), 'draft': draft_data(view.drafts.get(uid)),
-            'orders': [order_data(order) for order in await service.orders.for_user(uid)],
-            'favorites': [asdict(item) for item in await service.customer.list(uid)], 'summaries': summaries}
+            'session': orders.session(uid), 'draft': draft_data(orders.drafts.get(uid)),
+            'orders': [order_data(order) for order in orders.for_user(uid)],
+            'favorites': [asdict(item) for item in customer.list(uid)], 'summaries': summaries}
 
 
 @router.get('/staff/{cafe_id}')
 async def staff(cafe_id: str, service: Scope = Depends(scope)):
-    await service.roles.require_cafe(service.uid, cafe_id)
-    now = local_now()
-    role_view = await service.roles.view()
-    counts, average = await service.orders.rating_summary(service.uid, cafe_id)
+    view = await service.store.call('state', 'current', local_now())
+    role_view, orders, now = view.roles, view.orders, view.now
+    role_view.require_cafe(service.uid, cafe_id)
+    counts, average = orders.rating_summary(service.uid, cafe_id)
     periods = []
     for item in configurable_breaks(now):
-        summary = await service.orders.slots(cafe_id, item.id, now)
+        summary = orders.slots(cafe_id, item.id, now)
         periods.append({'id': item.id, 'label': item.label, **asdict(summary), 'free': summary.free, 'active': summary.active})
     queue = []
     for status in STATUSES:
         queue.extend(order_data(order, service.uid, role_view.is_admin(service.uid))
-                     for order in await service.orders.for_cafe(service.uid, cafe_id, status))
+                     for order in orders.for_cafe(service.uid, cafe_id, status))
     return {'orders': queue, 'periods': periods, 'rating_count': counts, 'rating_average': average,
             'baristas': sorted(uid for uid in role_view.staff_for(cafe_id) if cafe_id in role_view.barista_cafes(uid))}
 
 
 class Action(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: str
-    cafe_id: str = ''
-    drink_id: str = ''
-    product_id: str = ''
-    break_id: str = ''
-    token: str = ''
-    session: str = ''
-    reference: str = ''
-    key: str = ''
+    action: str = Field(max_length=40)
+    cafe_id: str = Field(default='', max_length=20)
+    drink_id: str = Field(default='', max_length=32)
+    product_id: str = Field(default='', max_length=20)
+    break_id: str = Field(default='', max_length=20)
+    token: str = Field(default='', max_length=16)
+    session: str = Field(default='', max_length=8)
+    reference: str = Field(default='', max_length=64)
+    key: str = Field(default='', max_length=12)
     comment: str = Field(default='', max_length=300)
     value: int = Field(default=0, strict=True)
     revision: int = Field(default=0, ge=0, strict=True)
-    target_id: int = Field(default=0, ge=0, strict=True)
-    enabled: bool = True
-    status: str = ''
+    target_id: int = Field(default=0, ge=0, le=2**63-1, strict=True)
+    enabled: bool = Field(default=True, strict=True)
+    status: str = Field(default='', max_length=16)
 
 
-async def notification(kind, order, token):
+async def notification(kind, order, token, store):
     from app.bot.notifications import notify_staff, notify_student
-    async with Bot(token) as bot:
-        await (notify_staff(bot, order) if kind == 'staff' else notify_student(bot, order))
+    try:
+        async with Bot(token) as bot:
+            await (notify_staff(bot, order, store=store) if kind == 'staff' else notify_student(bot, order, store=store))
+    except (TelegramAPIError, SQLAlchemyError, OSError, TimeoutError, ValueError):
+        logging.getLogger(__name__).warning('Не удалось отправить уведомление после сохранения заказа.')
 
 
 @router.post('/action')
@@ -139,18 +145,18 @@ async def action(body: Action, background: BackgroundTasks, request: Request, se
         if operation == 'begin':
             value = await service.orders.begin(uid)
         elif operation == 'cancel':
-            await service.orders.cancel_session(uid, body.session)
+            if not await service.orders.cancel_session(uid, body.session):
+                raise ValueError('Оформление устарело. Обновите приложение.')
         elif operation == 'prepare':
             value = draft_data(await service.orders.prepare(uid, body.cafe_id, body.drink_id, body.break_id, now,
                 comment=body.comment, session=body.session))
         elif operation == 'comment':
-            await service.orders.start_comment(uid, body.token, now)
-            value = draft_data(await service.orders.save_comment(uid, body.token, body.comment or None, now))
+            value = draft_data(await service.orders.edit_comment(uid, body.token, body.comment, now))
         elif operation == 'confirm':
             order, created = await service.orders.confirm_once(uid, body.token, now)
             value = order_data(order)
             if created:
-                background.add_task(notification, 'staff', order, request.app.state.settings.bot_token)
+                background.add_task(notification, 'staff', order, request.app.state.settings.bot_token, service.orders.store)
         elif operation == 'favorite_draft':
             value = asdict(await service.customer.add_draft(uid, body.token, now))
         elif operation == 'favorite_order':
@@ -159,18 +165,14 @@ async def action(body: Action, background: BackgroundTasks, request: Request, se
             await service.customer.remove(uid, body.key)
         elif operation in {'repeat', 'favorite_prepare'}:
             kind, key = ('r', body.reference) if operation == 'repeat' else ('f', body.key)
-            periods = available_breaks(now)
-            if not periods:
-                raise ValueError(closed_message(now))
-            session = await service.orders.begin(uid)
-            value = draft_data(await service.customer.prepare(uid, kind, key, periods[0].id, now, session=session))
+            value = draft_data(await service.customer.prepare_shortcut(uid, kind, key, now))
         elif operation == 'rate':
             value = order_data(await service.orders.rate(uid, body.reference, body.value))
         elif operation == 'transition':
             order = await service.orders.resolve_reference(body.reference)
             order = await service.orders.transition(uid, order.number, body.status, body.revision, now)
             value = order_data(order)
-            background.add_task(notification, 'student', order, request.app.state.settings.bot_token)
+            background.add_task(notification, 'student', order, request.app.state.settings.bot_token, service.orders.store)
         elif operation == 'set_open':
             await service.cafes.set_open(uid, body.cafe_id, body.enabled)
         elif operation == 'set_available':

@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
-from app.config import get_settings
+from dotenv import load_dotenv
+from app.config import ENV_PATH
 
 
 def mini_app_url():
@@ -8,4 +9,5 @@ def mini_app_url():
         path = Path(__file__).resolve().parents[2] / '.local' / 'mini-app-url.txt'
         if path.exists():
             return path.read_text(encoding='utf-8').strip()
-    return get_settings().mini_app_url
+    load_dotenv(ENV_PATH)
+    return os.getenv('MINI_APP_URL', '')

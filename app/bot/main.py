@@ -3,7 +3,7 @@ import logging
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import BotCommand
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter, TelegramServerError
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 
 from app.config import get_bot_token
@@ -34,6 +34,9 @@ async def run_bot(token):
     from app.ordering.roles import roles
     from app.ordering.bans import bans
     from app.db.ordering_connection import close
+    from app.db.ordering_connection import database
+    from app.db.readiness import ensure_schema
+    from app.ordering.seed import seed
     roles.validate_configuration()
     bans.validate_configuration()
     dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
@@ -43,10 +46,14 @@ async def run_bot(token):
     dp.callback_query.filter(F.message.chat.type == 'private')
     dp.include_routers(entry.router, staff.router, customer.router, student.router)
     try:
+        await ensure_schema(database())
+        await seed(database().sessions)
         async with Bot(token=token) as bot, message_cleanup_worker(bot):
+            for warning in roles.configuration_warnings(bot.id):
+                logging.warning(warning)
             try:
                 await configure_commands(bot)
-            except TelegramAPIError:
+            except (TelegramNetworkError, TelegramRetryAfter, TelegramServerError):
                 logging.warning('Не удалось обновить меню команд; продолжаем запуск.')
             await dp.start_polling(bot, close_bot_session=False)
     finally:

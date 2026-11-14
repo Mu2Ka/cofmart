@@ -11,6 +11,15 @@ from app.ordering import settings
 from app.ordering.seed import seed
 from tests.helpers import TOKEN, init_data
 from tests.integration.test_postgres import pgdb
+from datetime import datetime
+from app.ordering.schedule import LOCAL_TIMEZONE
+from sqlalchemy import event
+from sqlalchemy import text
+import os
+from types import SimpleNamespace
+from app.db.session import Database
+from app.ordering.orders import Draft, OrderError
+from app.ordering.schedule import local_now
 
 pytestmark = pytest.mark.postgres
 
@@ -121,3 +130,125 @@ async def test_blocked_user_cannot_open_mini_app(full_client, monkeypatch):
     response = await full_client.get('/flow/state', headers=headers())
     assert response.status_code == 403
     assert 'заблокированы' in response.json()['detail']
+
+
+async def test_blocked_user_cannot_bypass_policy_through_legacy_api(full_client, monkeypatch):
+    monkeypatch.setattr(settings,'BLOCKED_USER_IDS',{1001})
+    for path in ['/orders','/cafes','/cafes/1/menu','/cafes/1/slots','/flow/state']:
+        response = await full_client.get(path,headers=headers())
+        assert response.status_code == 403, (path,response.text)
+
+
+async def test_comment_edit_is_atomic_can_clear_and_invalidates_old_confirmation(full_client):
+    client = full_client
+    state = (await client.get('/flow/state',headers=headers())).json()
+    session = (await perform(client,'begin'))['result']
+    draft = (await perform(client,'prepare',cafe_id='1',drink_id='1_350',
+        break_id=state['periods'][0]['id'],session=session))['result']
+    edited = (await perform(client,'comment',token=draft['token'],comment='🧊'*300))['result']
+    assert edited['comment'] == '🧊'*300
+    assert edited['reserved_until'] == draft['reserved_until']
+    await perform(client,'confirm',token=draft['token'],expected=409)
+    cleared = (await perform(client,'comment',token=edited['token'],comment=''))['result']
+    assert cleared['comment'] == ''
+    await perform(client,'confirm',token=cleared['token'])
+
+
+async def test_cancel_stale_session_does_not_discard_new_draft(full_client):
+    first = (await perform(full_client,'begin'))['result']
+    second = (await perform(full_client,'begin'))['result']
+    await perform(full_client,'cancel',session=first,expected=409)
+    state = (await full_client.get('/flow/state',headers=headers())).json()
+    assert state['session'] == second
+
+
+async def test_rejected_shortcut_preserves_current_reservation(full_client):
+    state = (await full_client.get('/flow/state',headers=headers())).json()
+    session = (await perform(full_client,'begin'))['result']
+    draft = (await perform(full_client,'prepare',cafe_id='1',drink_id='1_350',
+        break_id=state['periods'][0]['id'],session=session))['result']
+    await perform(full_client,'favorite_prepare',key='missing',expected=409)
+    current = (await full_client.get('/flow/state',headers=headers())).json()
+    assert current['draft']['token'] == draft['token']
+    assert current['session'] == session
+
+
+async def test_baristas_cannot_both_claim_same_revision(full_client,monkeypatch):
+    monkeypatch.setattr(settings,'BARISTA_CAFES',{9002:{'1'},9003:{'1'}})
+    state = (await full_client.get('/flow/state',headers=headers())).json()
+    session = (await perform(full_client,'begin'))['result']
+    draft = (await perform(full_client,'prepare',cafe_id='1',drink_id='1_350',
+        break_id=state['periods'][0]['id'],session=session))['result']
+    order = (await perform(full_client,'confirm',token=draft['token']))['result']
+    replies = await asyncio.gather(*[full_client.post('/flow/action',headers=headers(uid),json={
+        'action':'transition','reference':order['reference'],'status':'preparing','revision':0})
+        for uid in (9002,9003)])
+    assert sorted(reply.status_code for reply in replies) == [200,409]
+
+
+async def test_http_pause_boundaries_preserve_history_and_staff_access(full_client, monkeypatch):
+    monkeypatch.setattr(settings,'FOLLOW_SCHEDULE',True)
+    clock = [datetime(2031,1,2,9,39,30,tzinfo=LOCAL_TIMEZONE)]
+    monkeypatch.setattr('app.api.routers.flow.local_now',lambda:clock[0])
+    state = (await full_client.get('/flow/state',headers=headers())).json()
+    session = (await perform(full_client,'begin'))['result']
+    draft = (await perform(full_client,'prepare',cafe_id='1',drink_id='1_350',
+        break_id=state['periods'][0]['id'],session=session))['result']
+    clock[0] = clock[0].replace(minute=40,second=0)
+    paused = (await full_client.get('/flow/state',headers=headers())).json()
+    assert paused['periods'] == [] and paused['draft'] is None
+    await perform(full_client,'confirm',token=draft['token'],expected=409)
+    assert (await full_client.get('/flow/staff/1',headers=headers(9002))).status_code == 200
+    clock[0] = clock[0].replace(minute=50,second=0)
+    opened = (await full_client.get('/flow/state',headers=headers())).json()
+    assert len(opened['periods']) == 1
+
+
+async def test_state_uses_one_snapshot_instead_of_reload_per_field(full_client, pgdb):
+    selects=[]
+    def capture(conn,cursor,statement,parameters,context,executemany):
+        if statement.lstrip().upper().startswith('SELECT'):
+            selects.append(statement)
+    event.listen(pgdb.engine.sync_engine,'before_cursor_execute',capture)
+    try:
+        response = await full_client.get('/flow/state',headers=headers(9001))
+        assert response.status_code == 200
+        assert len(selects) <= 12, len(selects)
+    finally:
+        event.remove(pgdb.engine.sync_engine,'before_cursor_execute',capture)
+
+
+async def test_bot_and_api_pools_compete_for_one_reservation(full_client, pgdb):
+    async with pgdb.sessions() as session:
+        schema = await session.scalar(text('SELECT current_schema()'))
+    bot_db = Database(os.environ['TEST_DATABASE_URL'],
+                      connect_args={'server_settings':{'search_path':schema}})
+    try:
+        bot = PostgresStore(bot_db.sessions,clock=local_now)
+        await bot.register(SimpleNamespace(id=1002,first_name='Другой студент',username=None))
+        state = (await full_client.get('/flow/state',headers=headers())).json()
+        period = state['periods'][0]['id']
+        staff = (await full_client.get('/flow/staff/1',headers=headers(9002))).json()
+        await perform(full_client,'set_slots',uid=9002,cafe_id='1',break_id=period,value=1,
+                      revision=staff['periods'][0]['revision'])
+        web_session = (await perform(full_client,'begin'))['result']
+        bot_session = await bot.call('orders','begin',1002)
+        web, native = await asyncio.gather(
+            full_client.post('/flow/action',headers=headers(),json={'action':'prepare','cafe_id':'1',
+                'drink_id':'1_350','break_id':period,'session':web_session}),
+            bot.call('orders','prepare',1002,'1','1_350',period,local_now(),session=bot_session),
+            return_exceptions=True)
+        assert not isinstance(web,Exception)
+        assert (web.status_code==200) + isinstance(native,Draft) == 1
+        assert web.status_code in (200,409)
+        assert isinstance(native,(Draft,OrderError))
+        uid, token = (1001,web.json()['result']['token']) if web.status_code==200 else (1002,native.token)
+        api_order, bot_order = await asyncio.gather(
+            perform(full_client,'confirm',uid=uid,token=token),
+            bot.call('orders','confirm_once',uid,token,local_now()))
+        assert api_order['result']['number'] == bot_order[0].number
+        assert len(await bot.call('orders','for_user',uid)) == 1
+        final = (await full_client.get('/flow/staff/1',headers=headers(9002))).json()['periods'][0]
+        assert (final['free'],final['confirmed'],final['reserved']) == (0,1,0)
+    finally:
+        await bot_db.close()

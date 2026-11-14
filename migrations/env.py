@@ -9,7 +9,8 @@ from app.db.session import Database
 
 
 def run(connection):
-    context.configure(connection=connection, target_metadata=Base.metadata, compare_type=True)
+    context.configure(connection=connection, target_metadata=Base.metadata, compare_type=True,
+                      compare_server_default=True)
     with context.begin_transaction():
         context.run_migrations()
 
@@ -23,7 +24,10 @@ async def online():
         await db.close()
 
 
-if context.is_offline_mode():
+existing_connection = context.config.attributes.get('connection')
+if existing_connection is not None:
+    run(existing_connection)
+elif context.is_offline_mode():
     context.configure(url=get_settings().database_url, target_metadata=Base.metadata, literal_binds=True)
     with context.begin_transaction():
         context.run_migrations()

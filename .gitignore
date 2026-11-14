@@ -14,3 +14,7 @@ coverage/
 .qa/
 .local/
 app/local_settings.py
+frontend/test-results/
+frontend/playwright-report/
+data/blocked_users.json
+data/blocked_users.tmp

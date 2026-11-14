@@ -31,15 +31,16 @@ def message_key(message):
     return bot.id, message.chat.id, message.message_id
 
 
-async def expire_message(message, seconds: int):
+async def expire_message(message, seconds: int, *, store=None):
     key = message_key(message)
     if key is None:
         return
     try:
+        store = store or persistent.get_store()
         if seconds == 0:
-            await persistent.get_store().cancel_deletion(*key)
+            await store.cancel_deletion(*key)
         else:
-            await persistent.get_store().schedule_deletion(*key, datetime.now(timezone.utc) + timedelta(seconds=seconds))
+            await store.schedule_deletion(*key, datetime.now(timezone.utc) + timedelta(seconds=seconds))
     except (SQLAlchemyError, OSError, TimeoutError):
         # Ошибка очистки чата не должна отменять уже сохранённый заказ.
         logger.warning("Не удалось запланировать удаление сообщения.")

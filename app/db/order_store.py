@@ -54,6 +54,11 @@ class State:
         self.orders.slot_epoch = 0
         self.customer = CustomerService(self.orders)
 
+    def current(self, now):
+        self.orders.expire_reservations(now)
+        self.now = now
+        return self
+
     def rows(self) -> dict:
         orders = self.orders
         users = set(orders.sessions) | set(orders.waiting_comments) | set(orders.slot_edits)
@@ -207,7 +212,7 @@ class PostgresStore:
                     state.orders.number_factory = lambda: number
             error = None
             try:
-                target = getattr(state, service)
+                target = state if service == 'state' else getattr(state, service)
                 if method == "view":
                     result = target
                 else:

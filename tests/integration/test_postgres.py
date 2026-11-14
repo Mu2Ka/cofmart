@@ -2,6 +2,9 @@ import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from pathlib import Path
+from alembic import command
+from alembic.config import Config
 
 import pytest
 from sqlalchemy import func, select, text
@@ -28,8 +31,12 @@ async def pgdb():
         await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
     db = Database(url, connect_args={"server_settings": {"search_path": schema}}, pool_size=10, max_overflow=10)
     try:
+        def migrate(connection):
+            config = Config(str(Path(__file__).resolve().parents[2] / 'alembic.ini'))
+            config.attributes['connection'] = connection
+            command.upgrade(config, 'head')
         async with db.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(migrate)
         await seed(db.sessions)
         async with db.sessions() as session, session.begin():
             session.add(PickupSlot(id=1, cafe_id=1, starts_at=datetime.now(timezone.utc) + timedelta(hours=1), capacity=1))
